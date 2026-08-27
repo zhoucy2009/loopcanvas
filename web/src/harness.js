@@ -424,7 +424,23 @@ export function normalizePlanResponse(raw, requestId) {
   const response = raw.response && typeof raw.response === "object" ? raw.response : raw;
   const returnedId = response.requestID ?? response.request_id;
   if (returnedId && returnedId !== requestId) throw new Error("Agent 返回了错误的 requestID。");
-  if ((response.status ?? "success") === "failure") throw new Error(response.error || "Agent 判断或执行失败。");
+  if (String(response.status ?? "success").trim().toLowerCase() === "failure") {
+    const result = response.result && typeof response.result === "object" ? response.result : {};
+    const blockingIssues = Array.isArray(result.blockingIssues ?? result.blocking_issues)
+      ? (result.blockingIssues ?? result.blocking_issues).map(String).filter(Boolean)
+      : [];
+    const reason = [
+      response.error,
+      response.message,
+      response.assistantMessage,
+      response.assistant_message,
+      response.reason,
+      blockingIssues.length ? blockingIssues.join("；") : "",
+      result.summary,
+      result.deviation
+    ].map((value) => String(value ?? "").trim()).find(Boolean);
+    throw new Error(reason || "Agent 返回 failure，但没有提供具体错误。");
+  }
   if (!Array.isArray(response.steps) || response.steps.length < 1 || response.steps.length > 12) throw new Error("Harness 必须返回 1–12 个真实执行节点。");
   const requestedShape = response.executionShape ?? response.execution_shape;
   const executionShape = ["single", "graph"].includes(requestedShape) ? requestedShape : response.steps.length === 1 ? "single" : "graph";
@@ -934,21 +950,26 @@ export async function planWithHarness(project, settings, signal, onEvent) {
     attachments: project.attachments ?? [],
     requirementDirectives: project.directives ?? [],
     existingSteps: [],
-    responseInstructions: `只返回一个 JSON。共同字段：{\"requestID\":\"${requestId}\",\"status\":\"success\",\"executionShape\":\"single|graph\",\"assistantMessage\":\"判断依据和公开摘要\",\"primaryArtifact\":{\"title\":\"...\",\"kind\":\"html|markdown|text\",\"filename\":\"项目内相对路径\",\"entrypoint\":\"...\",\"acceptanceCriteria\":[\"客观条件\"]},\"steps\":[{\"id\":\"UUID\",\"title\":\"真实执行节点\",\"purpose\":\"...\",\"kind\":\"analyze|decision|build|integrate|verify|deliver\",\"riskLevel\":\"L0|L1|L2|L3\",\"cautionLevel\":null或\"low|medium|high\",\"dependencies\":[\"前置节点UUID\"],\"parallelSafe\":false,\"writeScope\":[\"预计写入的相对路径\"],\"requiresUserDirection\":false,\"directionQuestion\":\"仅在需要方向时填写简洁问题\",\"directionOptions\":[{\"id\":\"稳定短ID\",\"label\":\"可直接选择的名称\",\"description\":\"这个方向的范围或取舍\"}],\"acceptanceCriteria\":[\"节点完成条件\"],\"appliedDirectiveIDs\":[\"约束UUID\"]}]}。requiresUserDirection=true 时 directionOptions 必须有 2–5 个互斥选项；用户可另写补充但补充不是必填。若 executionShape=single：steps 只能有一个节点，立即在本次调用内完成实现和验证，并额外返回 result：{\"summary\":\"...\",\"actualChanges\":[\"...\"],\"evidence\":[\"...\"],\"deviation\":\"...\",\"rollback\":\"...\",\"verificationPassed\":true,\"blockingIssues\":[],\"artifact\":{\"title\":\"...\",\"kind\":\"html|markdown|text\",\"filename\":\"与 primaryArtifact 一致\",\"projectRoot\":\"绝对工作目录\",\"files\":[\"...\"],\"entrypoint\":\"...\",\"dependencies\":[],\"runCommands\":[],\"testCommands\":[],\"testResults\":[]}}。若 executionShape=graph：返回 2–12 个真实节点和依赖，本次不得修改任何项目文件，也不要返回普通方案 options/subprocesses；方向节点的 directionOptions 是人类门控输入。`
+    responseInstructions: `只返回一个 JSON。共同字段：{\"requestID\":\"${requestId}\",\"status\":\"success\",\"executionShape\":\"single|graph\",\"assistantMessage\":\"判断依据和公开摘要\",\"primaryArtifact\":{\"title\":\"...\",\"kind\":\"html|markdown|text\",\"filename\":\"项目内相对路径\",\"entrypoint\":\"...\",\"acceptanceCriteria\":[\"客观条件\"]},\"steps\":[{\"id\":\"UUID\",\"title\":\"真实执行节点\",\"purpose\":\"...\",\"kind\":\"analyze|decision|build|integrate|verify|deliver\",\"riskLevel\":\"L0|L1|L2|L3\",\"cautionLevel\":null或\"low|medium|high\",\"dependencies\":[\"前置节点UUID\"],\"parallelSafe\":false,\"writeScope\":[\"预计写入的相对路径\"],\"requiresUserDirection\":false,\"directionQuestion\":\"仅在需要方向时填写简洁问题\",\"directionOptions\":[{\"id\":\"稳定短ID\",\"label\":\"可直接选择的名称\",\"description\":\"这个方向的范围或取舍\"}],\"acceptanceCriteria\":[\"节点完成条件\"],\"appliedDirectiveIDs\":[\"约束UUID\"]}]}。requiresUserDirection=true 时 directionOptions 必须有 2–5 个互斥选项；用户可另写补充但补充不是必填。若 executionShape=single：steps 只能有一个节点，立即在本次调用内完成实现和验证，并额外返回 result：{\"summary\":\"...\",\"actualChanges\":[\"...\"],\"evidence\":[\"...\"],\"deviation\":\"...\",\"rollback\":\"...\",\"verificationPassed\":true,\"blockingIssues\":[],\"artifact\":{\"title\":\"...\",\"kind\":\"html|markdown|text\",\"filename\":\"与 primaryArtifact 一致\",\"projectRoot\":\"绝对工作目录\",\"files\":[\"...\"],\"entrypoint\":\"...\",\"dependencies\":[],\"runCommands\":[],\"testCommands\":[],\"testResults\":[]}}。若 executionShape=graph：返回 2–12 个真实节点和依赖，本次不得修改任何项目文件，也不要返回普通方案 options/subprocesses；方向节点的 directionOptions 是人类门控输入。若无法完成，必须返回 {\"requestID\":\"${requestId}\",\"status\":\"failure\",\"error\":\"具体、可恢复的失败原因\"}，error 不得为空。`
   };
   const workspace = resolveProjectWorkspace(project, settings);
   const documents = await harnessDocuments(project, workspace);
   const rawOutput = await invoke(request, settings, { workspace, ...documents }, signal, onEvent);
-  const planned = normalizePlanResponse(extractJSONObject(rawOutput), requestId);
-  if (planned.executionShape === "single" && planned.execution?.artifact) {
-    validateArtifactBoundary(planned.execution.artifact, workspace);
-    if (planned.execution.artifact.filename !== planned.primaryArtifact.filename || planned.execution.artifact.kind !== planned.primaryArtifact.kind) {
-      throw new Error(`一步直达返回的 ${planned.execution.artifact.filename}（${planned.execution.artifact.kind}）与锁定主交付物 ${planned.primaryArtifact.filename}（${planned.primaryArtifact.kind}）不一致。`);
+  let planned;
+  try {
+    planned = normalizePlanResponse(extractJSONObject(rawOutput), requestId);
+    if (planned.executionShape === "single" && planned.execution?.artifact) {
+      validateArtifactBoundary(planned.execution.artifact, workspace);
+      if (planned.execution.artifact.filename !== planned.primaryArtifact.filename || planned.execution.artifact.kind !== planned.primaryArtifact.kind) {
+        throw new Error(`一步直达返回的 ${planned.execution.artifact.filename}（${planned.execution.artifact.kind}）与锁定主交付物 ${planned.primaryArtifact.filename}（${planned.primaryArtifact.kind}）不一致。`);
+      }
     }
+    const mapped = new Set(planned.steps.flatMap((step) => step.appliedDirectiveIDs));
+    const missing = (project.directives ?? []).filter((directive) => ["required", "forbidden"].includes(directive.strength) && !mapped.has(directive.id));
+    if (missing.length) throw new Error(`计划未映射硬约束：${missing.map((directive) => directive.text).join("；")}`);
+  } catch (error) {
+    throwWithExecutionContext(error, { request, rawOutput });
   }
-  const mapped = new Set(planned.steps.flatMap((step) => step.appliedDirectiveIDs));
-  const missing = (project.directives ?? []).filter((directive) => ["required", "forbidden"].includes(directive.strength) && !mapped.has(directive.id));
-  if (missing.length) throw new Error(`计划未映射硬约束：${missing.map((directive) => directive.text).join("；")}`);
   return { result: planned, request, rawOutput };
 }
 

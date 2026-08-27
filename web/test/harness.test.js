@@ -238,6 +238,20 @@ test("normalizePlanResponse 拒绝错误 requestID", () => {
   assert.throws(() => normalizePlanResponse({ requestID: "wrong", steps: [] }, "expected"), /requestID/);
 });
 
+test("normalizePlanResponse 优先展示 Agent 返回的具体失败原因", () => {
+  assert.throws(() => normalizePlanResponse({
+    requestID: "failed-plan",
+    status: "failure",
+    assistantMessage: "工作目录不可写，请重新选择目录。"
+  }, "failed-plan"), /工作目录不可写/);
+  assert.throws(() => normalizePlanResponse({
+    requestID: "failed-plan",
+    status: "failure",
+    result: { blockingIssues: ["缺少运行权限"] }
+  }, "failed-plan"), /缺少运行权限/);
+  assert.throws(() => normalizePlanResponse({ requestID: "failed-plan", status: "failure" }, "failed-plan"), /没有提供具体错误/);
+});
+
 test("normalizeExecutionResponse 兼容 snake_case 结果", () => {
   const response = normalizeExecutionResponse({
     request_id: "request-2",

@@ -600,7 +600,7 @@ function intakeTemplate(project = null) {
     <div class="eyebrow">START WITH AN OUTCOME</div>
     <h2>${project ? "确认目标并立即开始" : "今天想完成什么？"}</h2>
     <p>Harness 会先判断任务：简单任务在同一次调用中完成、审核并交付；复杂任务展示真实执行窗口，并按依赖自动推进。</p>
-    ${project?.lastError ? `<div class="card error-card">上次规划失败：${escapeHTML(project.lastError)}${project.pendingAction?.type === "plan" ? `<div><button id="retry-plan" class="secondary compact">重新发送规划请求</button></div>` : ""}</div>` : ""}
+    ${project?.lastError ? `<div class="card error-card">上次规划失败：${escapeHTML(project.lastError)}${["plan", "route_project"].includes(project.pendingAction?.type) ? `<div><button id="retry-plan" class="secondary compact">重新发送规划请求</button></div>` : ""}</div>` : ""}
     <textarea id="goal-input" class="goal-input" placeholder="描述目标、约束、已有材料和你最在意的结果……" ${hasFixedGoal ? "readonly" : ""}>${escapeHTML(project?.goal ?? "")}</textarea>
     ${attachmentChips(fixedAttachments)}${attachmentChips(draftAttachments, true)}${executionReferenceChips(project?.executionReferences, true)}
     <div class="intake-actions"><span class="safe-note">单文件 25 MiB · 单批 100 MiB · 全部保存在本机</span><div class="intake-action-group">

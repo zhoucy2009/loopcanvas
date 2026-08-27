@@ -1076,6 +1076,42 @@ test("自适应 single 在首调用内直接验证并交付，不再二次执行
   }
 });
 
+test("规划响应校验失败时保存原始 Agent 记录与可重试状态", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-plan-failure-record-"));
+  const runtime = await startServer({
+    port: 0,
+    dataDirectory: directory,
+    workspace: path.join(directory, "deliverables"),
+    planWithHarness: async () => {
+      const error = new Error("工作目录不可写，请重新选择目录。");
+      error.executionContext = {
+        request: { id: "failed-route-request", kind: "route_project" },
+        rawOutput: '{"status":"failure","assistantMessage":"工作目录不可写，请重新选择目录。"}'
+      };
+      throw error;
+    }
+  });
+  try {
+    const bootstrap = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
+    const headers = { "Content-Type": "application/json", "X-LoopCanvas-Token": bootstrap.token };
+    const created = await (await fetch(`${runtime.url}/api/projects`, { method: "POST", headers, body: JSON.stringify({ goal: "创建一个页面" }) })).json();
+    const response = await fetch(`${runtime.url}/api/projects/${created.project.id}/plan`, { method: "POST", headers, body: JSON.stringify({ goal: "创建一个页面" }) });
+    assert.equal(response.status, 400);
+    const failed = runtime.store.project(created.project.id);
+    assert.equal(failed.pendingAction.type, "route_project");
+    assert.equal(failed.pendingAction.status, "failed");
+    assert.match(failed.lastError, /工作目录不可写/);
+    const listing = await (await fetch(`${runtime.url}/api/projects/${created.project.id}/conversations`, { headers })).json();
+    const recordMeta = listing.items.find((item) => item.operation === "route-project" && item.status === "failed");
+    const record = await (await fetch(`${runtime.url}/api/projects/${created.project.id}/conversations/${encodeURIComponent(recordMeta.id)}`, { headers })).json();
+    assert.equal(record.record.request.id, "failed-route-request");
+    assert.match(record.record.output, /工作目录不可写/);
+  } finally {
+    await new Promise((resolve) => runtime.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("自适应 graph 会暂停方向问题、询问并行方式并在依赖汇合后交付", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-adaptive-graph-"));
   let active = 0;

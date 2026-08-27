@@ -1593,13 +1593,22 @@ export async function createLoopCanvasServer(options = {}) {
           await writeConversationRecord(dataDirectory, { projectId: project.id, operation: "route-project", status: "success", request: planned.request, output: planned.rawOutput }).catch(() => null);
           return json(response, 200, { state: publicState(store, busyProjects) });
         } catch (error) {
+          const failureContext = error.executionContext && typeof error.executionContext === "object" ? error.executionContext : null;
           if (ownsProjectCall(activeControllers, project.id, controller)) {
             await store.mutate(() => {
               project.phase = "intake";
               project.lastError = error.message;
               project.pendingAction = { ...(project.pendingAction ?? { type: "route_project", goal: project.goal }), status: controller.signal.aborted ? "cancelled" : "failed", error: error.message };
             });
-            await writeConversationRecord(dataDirectory, { projectId: project.id, operation: "route-project", status: "failed", error: error.message }).catch(() => null);
+            await writeConversationRecord(dataDirectory, {
+              projectId: project.id,
+              operation: "route-project",
+              status: "failed",
+              runtime,
+              error: error.message,
+              request: failureContext?.request,
+              output: failureContext?.rawOutput
+            }).catch(() => null);
             const diagnostic = await writeDiagnostic(dataDirectory, { operation: "route-project", projectId: project.id, error: error.message }).catch(() => null);
             if (diagnostic) await store.mutate(() => appendLog(project, "system", "判断或执行失败", `脱敏诊断：${diagnostic.path ?? diagnostic.filename}`));
           }
