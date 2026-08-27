@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-todo",
+  "name": "任务清单工具",
+  "kind": "tool",
+  "category": "execution",
+  "package": "@deepseek-ai/dsh-tool-todo",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供 todo_write 任务清单工具，基于事件溯源的会话日志维护任务进度，支持并行进行中的任务。",
+  "problem": "多步骤任务容易丢失进度和当前焦点；没有任务清单时模型和用户都看不清还剩什么。",
+  "audience": "多步骤、长任务场景的用户；需要随时确认进度的协作场景。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["任务清单", "进度", "todo"]
+}

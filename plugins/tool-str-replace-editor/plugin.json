@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-str-replace-editor",
+  "name": "精确文本编辑",
+  "kind": "tool",
+  "category": "filesystem",
+  "package": "@deepseek-ai/dsh-tool-str-replace-editor",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "提供查看、创建、字面量替换与按行插入工具，要求精确匹配原文，避免模糊改写。",
+  "problem": "整文件重写或模糊编辑会误改多处相似文本、产生不可控 diff；需要精确到字面量匹配的编辑方式。",
+  "audience": "追求精确编辑、希望 diff 干净可审查的开发者；也是极简模式的核心编辑工具。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载；极简模式中与持久 Bash 组成双工具。",
+  "tags": ["编辑", "精确替换", "diff"]
+}

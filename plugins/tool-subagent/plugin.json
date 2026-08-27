@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-subagent",
+  "name": "子代理委派",
+  "kind": "tool",
+  "category": "delegation",
+  "package": "@deepseek-ai/dsh-tool-subagent",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供 subagent / subagent_fork 委派工具：把独立任务交给子代理，返回结构化结果。",
+  "problem": "主代理上下文有限，长任务全部自己做会溢出且串行低效；委派并行子任务可显著提速。",
+  "audience": "复杂多任务、需要并行调研或分块实现的用户。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载（spawn 与 fork 两种后端）。",
+  "tags": ["子代理", "委派", "并行"]
+}

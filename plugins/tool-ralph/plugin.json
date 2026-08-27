@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-ralph",
+  "name": "Ralph 循环",
+  "kind": "tool",
+  "category": "delegation",
+  "package": "@deepseek-ai/dsh-tool-ralph",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供 Ralph 循环工具：每轮启动全新子代理，不携带父对话，围绕不可变目标迭代到完成或阻断。",
+  "problem": "同一上下文的连续迭代容易带偏或固化错误；需要每轮全新上下文的强制迭代来收敛目标。",
+  "audience": "探索型任务、需要独立轮次迭代收敛的目标；适合让 Agent 自主推进的长期目标。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["Ralph", "迭代", "新鲜上下文"]
+}

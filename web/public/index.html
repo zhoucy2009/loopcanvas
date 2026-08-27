@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DSH Workflow Web</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app" class="app-shell" aria-busy="false">
+    <aside id="project-sidebar" class="sidebar" aria-label="项目导航">
+      <div class="brand">
+        <div class="brand-mark">L</div>
+        <div><strong>DSH Workflow</strong><span>DeepSeek Harness WebUI</span></div>
+      </div>
+      <button id="new-project" class="primary wide">＋ 新需求</button>
+      <div class="section-label">工作项目</div>
+      <nav id="project-list" class="project-list" aria-label="工作项目"></nav>
+      <details id="archived-projects" class="archived-projects">
+        <summary title="查看已归档任务"><span class="archived-label">已归档</span><span id="archived-count" class="archived-count">0</span></summary>
+        <nav id="archived-project-list" class="archived-project-list" aria-label="已归档任务"></nav>
+      </details>
+      <button id="sidebar-preview-toggle" class="sidebar-preview-toggle ghost wide" aria-controls="workspace" disabled><span class="preview-toggle-full">演示窗口</span><span class="preview-toggle-short" aria-hidden="true">演</span><span class="preview-notification hidden" aria-hidden="true"></span></button>
+      <div class="sidebar-footer">
+        <button id="collapse-sidebar" class="ghost wide" aria-controls="project-sidebar" aria-expanded="true">« 折叠侧栏</button>
+        <div id="local-state" class="local-state"></div>
+        <button id="open-settings" class="ghost wide">连接设置</button>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">AUTOMATIC · PREVIEW-GATED WORKFLOW</div>
+          <h1 id="page-title">把需求变成可验收的执行路线</h1>
+        </div>
+        <nav class="mode-switch" aria-label="工作模式">
+          <button class="active" data-app-mode="workflow" aria-pressed="true">执行</button>
+          <button data-app-mode="learning" aria-pressed="false">学习</button>
+          <button data-app-mode="exploration" aria-pressed="false">探索</button>
+        </nav>
+        <div class="top-actions">
+          <button id="open-remote" class="ghost compact remote-trigger" aria-controls="remote-panel" aria-expanded="false"><span class="remote-trigger-dot" aria-hidden="true"></span>Remote</button>
+          <button class="ghost compact" data-global-view="context">上下文</button>
+          <button class="ghost compact" data-global-view="log">决策记录</button>
+          <button class="ghost compact" data-global-view="agents">Agent 对话</button>
+          <button class="ghost compact" data-global-view="capabilities">能力</button>
+          <div id="harness-pill" class="status-pill" role="status" aria-live="polite" aria-atomic="true"></div>
+        </div>
+      </header>
+      <div id="workspace" class="workspace"></div>
+      <footer id="runtime-footer" class="runtime-footer" aria-label="运行统计">
+        <div class="runtime-live" role="status" aria-live="polite" aria-atomic="true">
+          <span id="runtime-live-dot" class="runtime-live-dot" aria-hidden="true"></span>
+          <span id="runtime-activity">等待自动执行</span>
+          <strong id="runtime-step-percent">—</strong>
+        </div>
+        <dl class="runtime-metrics">
+          <div><dt>缓存命中率</dt><dd id="metric-cache-hit">—</dd></div>
+          <div><dt>累计 Token</dt><dd id="metric-token-total">—</dd></div>
+          <div><dt>上下文占用</dt><dd id="metric-context">—</dd></div>
+          <div><dt id="metric-remaining-label">额度剩余</dt><dd id="metric-remaining">—</dd></div>
+        </dl>
+      </footer>
+    </main>
+  </div>
+
+  <aside id="remote-panel" class="remote-panel" aria-hidden="true" aria-label="Remote 设备">
+    <header class="remote-panel-header">
+      <div><div class="eyebrow">REMOTE · DEVICE HANDOFF</div><h2>投放到另一台设备</h2></div>
+      <button id="close-remote" class="icon-button" type="button" aria-label="关闭 Remote">×</button>
+    </header>
+    <p class="remote-intro">扫码把手机浏览器配对为控制器；把网页拖到真实在线设备。所有会改变项目状态的消息命令都要在本机逐条批准。</p>
+    <section class="remote-pairing" aria-labelledby="remote-pairing-title">
+      <div class="remote-section-heading"><strong id="remote-pairing-title">扫码配对</strong><button id="create-remote-pairing" type="button" class="ghost compact">生成一次性二维码</button></div>
+      <div id="remote-pairing-state" class="remote-pairing-state"></div>
+    </section>
+    <section class="remote-channels" aria-labelledby="remote-channel-title">
+      <div class="remote-section-heading"><strong id="remote-channel-title">消息入口</strong><span>官方 Webhook</span></div>
+      <div id="remote-channel-list" class="remote-channel-list"></div>
+    </section>
+    <section class="remote-devices" aria-labelledby="remote-device-title">
+      <div class="remote-section-heading"><strong id="remote-device-title">可投放设备</strong><span>拖网页到设备</span></div>
+      <div id="remote-device-list" class="remote-device-list"></div>
+    </section>
+    <section class="remote-commands" aria-labelledby="remote-command-title">
+      <div class="remote-section-heading"><strong id="remote-command-title">待批准命令</strong><span id="remote-command-count">0 条</span></div>
+      <div id="remote-command-list" class="remote-command-list"></div>
+    </section>
+    <p class="remote-apple-note"><strong>Apple Handoff</strong><span>同一 Apple ID 的 Safari 接续由系统管理。LoopCanvas 不枚举设备，也不读取浏览历史；原生 App 只能发布当前网页活动。</span></p>
+    <div id="remote-last-handoff" class="remote-last-handoff hidden" role="status" aria-live="polite"></div>
+  </aside>
+
+  <dialog id="remote-run-dialog" class="modal remote-run-dialog">
+    <form method="dialog" class="modal-card remote-run-card" id="remote-run-form">
+      <div class="modal-header">
+        <div><div class="eyebrow">REMOTE · WEB HANDOFF</div><h2>发送网页到设备</h2></div>
+        <button value="cancel" class="icon-button" aria-label="关闭">×</button>
+      </div>
+      <div id="remote-run-content" class="remote-run-content"></div>
+      <div class="modal-actions">
+        <button type="button" id="cancel-remote-run" class="ghost">取消</button>
+        <button type="submit" value="confirm" class="primary">确认投放</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="modal">
+    <form method="dialog" class="modal-card" id="settings-form">
+      <div class="modal-header">
+        <div><div class="eyebrow">LOCAL AGENT RUNTIMES</div><h2>本机 Agent 运行时</h2></div>
+        <button value="cancel" class="icon-button" aria-label="关闭">×</button>
+      </div>
+      <p class="settings-intro">检测并选择 dsh 或 Codex。DeepSeek Harness 保持成熟默认通道；选择 Codex 后，后续规划、执行、学习与探索会改走本机 App Server。</p>
+      <div id="install-guide" class="install-guide"></div>
+      <label>当前执行引擎<select id="setting-runtime"><option value="dsh">DeepSeek Harness (dsh)</option><option value="codex">Codex App Server</option></select></label>
+      <p id="runtime-choice-note" class="runtime-choice-note" role="status" aria-live="polite"></p>
+      <div id="dsh-runtime-fields" class="runtime-fields">
+        <label>dsh 可执行文件（留空自动检测）<input id="setting-dsh" placeholder="/完整路径/dsh"></label>
+        <div class="form-grid">
+          <label>DeepSeek 模型<select id="setting-model"><option value="deepseek-v4-pro">deepseek-v4-pro</option><option value="deepseek-v4-flash">deepseek-v4-flash</option></select></label>
+          <label>DeepSeek 推理强度<select id="setting-effort"><option value="off">off</option><option value="high">high</option><option value="max">max</option></select></label>
+        </div>
+      </div>
+      <div id="codex-runtime-fields" class="runtime-fields hidden">
+        <div class="form-grid">
+          <label>Codex 模型<select id="setting-codex-model" disabled><option value="">等待加载模型目录…</option></select></label>
+          <label>Codex 推理强度<select id="setting-codex-effort" disabled><option value="">由模型决定</option></select></label>
+        </div>
+        <p id="codex-model-status" class="runtime-status" role="status" aria-live="polite"></p>
+      </div>
+      <label>全局谨慎等级<select id="setting-caution"><option value="low">快速 · 减少额外检查</option><option value="medium">标准 · 平衡速度与验证</option><option value="high">谨慎 · 加强证据与停止条件</option></select></label>
+      <label>工作目录<input id="setting-workspace" placeholder="/Users/你/Documents/LoopCanvas/Deliverables"></label>
+      <p class="privacy-note">dsh 与 Codex 的凭据分别由各自工具管理；LoopCanvas 不要求、读取或保存。检测只运行版本与帮助命令，不发起模型请求。</p>
+      <div class="modal-actions">
+        <button type="button" id="probe-local-agents" class="secondary">检测本机 Agents</button>
+        <span id="probe-result" class="inline-status"></span>
+        <button type="submit" value="save" id="save-settings" class="primary">保存连接</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="info-dialog" class="modal wide-modal">
+    <div class="modal-card">
+      <div class="modal-header"><div><div id="info-eyebrow" class="eyebrow">PROJECT DATA</div><h2 id="info-title">项目信息</h2></div><button id="close-info" class="icon-button" aria-label="关闭">×</button></div>
+      <div id="info-content" class="info-content"></div>
+      <div id="info-actions" class="modal-actions"></div>
+    </div>
+  </dialog>
+
+  <dialog id="capability-dialog" class="modal wide-modal">
+    <div class="modal-card capability-card">
+      <div class="modal-header"><div><div class="eyebrow">LOCAL CAPABILITIES</div><h2>规则与能力</h2></div><button id="close-capability" class="icon-button" aria-label="关闭">×</button></div>
+      <div class="capability-tabs"><button data-capability="agents" class="secondary">AGENTS.md</button><button data-capability="skills" class="ghost">Skills</button><button data-capability="plugins" class="ghost">插件</button><button data-capability="diagnostics" class="ghost">脱敏诊断</button></div>
+      <div id="capability-content" class="info-content"></div>
+    </div>
+  </dialog>
+
+  <dialog id="plugin-confirm-dialog" class="modal wide-modal">
+    <div class="modal-card plugin-confirm-card">
+      <div class="modal-header">
+        <div><div class="eyebrow">DSH RUNTIME SYNC</div><h2 id="plugin-confirm-title">确认开启插件</h2></div>
+        <button id="close-plugin-confirm" class="icon-button" aria-label="关闭">×</button>
+      </div>
+      <div id="plugin-confirm-content" class="info-content"></div>
+      <div class="modal-actions">
+        <button id="cancel-plugin-confirm" class="ghost">取消</button>
+        <button id="confirm-plugin-enable" class="primary">确认并同步开启</button>
+      </div>
+    </div>
+  </dialog>
+
+  <input id="attachment-input" type="file" multiple hidden>
+  <input id="learning-file-input" type="file" multiple hidden>
+  <input id="learning-folder-input" type="file" multiple webkitdirectory directory hidden>
+
+  <aside id="transfer-dock" class="transfer-dock" aria-hidden="true" aria-label="跨模式投放">
+    <div class="transfer-dock-heading"><span>拖到这里</span><strong>选择下一步</strong></div>
+    <button type="button" data-transfer-mode="learning">
+      <span class="transfer-dock-icon">学</span>
+      <span><strong>放入学习</strong><small>解析内容并继续提问</small></span>
+    </button>
+    <button type="button" data-transfer-mode="workflow">
+      <span class="transfer-dock-icon">执</span>
+      <span><strong>加入执行</strong><small>作为参考进行临摹或实现</small></span>
+    </button>
+  </aside>
+
+  <div id="busy-layer" class="busy-layer hidden" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true"><div class="busy-card"><div class="spinner" aria-hidden="true"></div><div class="busy-copy"><strong id="busy-title">正在处理</strong><span id="busy-context">任务在后台运行，可以继续其他操作。</span></div><button id="pause-busy" class="danger compact">暂停本次调用</button></div></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script type="module" src="/app-v2.js"></script>
+</body>
+</html>

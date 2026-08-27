@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "plan-mode",
+  "name": "计划模式",
+  "kind": "tool",
+  "category": "planning",
+  "package": "@deepseek-ai/dsh-plan-mode",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "带日志的按 Agent 计划模式：先只读探索、产出完整计划，经 exit_plan_mode 提交用户审核后才进入实施。",
+  "problem": "直接动手改代码容易偏离方向、返工成本高；先计划再实施让改动可审查、可预期。",
+  "audience": "谨慎执行、重视可审查性的用户；复杂或多文件改动前的默认步骤。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["计划", "plan", "审查"]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "LoopCanvas Quiet UI"
+  short_description: "Design calm, efficient, low-fatigue product interfaces"
+  default_prompt: "Use $loopcanvas-ui to review and refine this LoopCanvas interface with restrained visual design and purposeful motion."

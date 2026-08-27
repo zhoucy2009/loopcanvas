@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 2,
+  "activeProjectId": "project-web-parity",
+  "settings": {
+    "dshPath": "",
+    "workspace": "/private/tmp/dshwf-web-browser-workspace",
+    "model": "deepseek-v4-pro",
+    "reasoningEffort": "high",
+    "cardPolicy": "high-risk-only"
+  },
+  "draftAttachments": [],
+  "archivedProjects": [
+    {
+      "id": "archived-one", "title": "历史归档", "goal": "历史目标", "phase": "complete",
+      "createdAt": "2026-08-15T10:00:00.000Z", "updatedAt": "2026-08-15T11:00:00.000Z", "steps": [], "context": [],
+      "decisionLog": [], "agents": [], "attachments": [], "directives": [], "checkpoints": [], "selectedStepId": null,
+      "isPaused": false, "handoff": null, "artifact": null, "lastError": null
+    }
+  ],
+  "projects": [
+    {
+      "id": "project-web-parity",
+      "title": "Web 功能等价迁移",
+      "goal": "必须把 LoopCanvas 原生版功能迁移到本机 Web UI；不要上传 API Key；使用 npx dshwf-web 启动。",
+      "phase": "workspace",
+      "createdAt": "2026-08-16T10:00:00.000Z",
+      "updatedAt": "2026-08-16T11:00:00.000Z",
+      "selectedStepId": "step-risk",
+      "isPaused": false,
+      "lastError": null,
+      "directives": [
+        {"id":"directive-1","text":"必须把 LoopCanvas 原生版功能迁移到本机 Web UI","strength":"required","source":"用户原始需求"},
+        {"id":"directive-2","text":"不要上传 API Key","strength":"forbidden","source":"用户原始需求"}
+      ],
+      "attachments": [],
+      "checkpoints": [
+        {"id":"checkpoint-1","at":"2026-08-16T10:30:00.000Z","reason":"布局完成","snapshot":{"id":"project-web-parity","title":"Web 功能等价迁移","goal":"旧目标","phase":"workspace","steps":[],"context":[],"decisionLog":[],"agents":[],"attachments":[],"directives":[],"selectedStepId":null,"isPaused":false,"artifact":null,"lastError":null}}
+      ],
+      "context": [
+        {"id":"context-1","at":"2026-08-16T10:00:00.000Z","kind":"user","author":"用户","content":"迁移全部功能。"},
+        {"id":"context-2","at":"2026-08-16T10:20:00.000Z","kind":"plan","author":"DeepSeek Harness","content":"已生成端到端迁移计划。"}
+      ],
+      "decisionLog": [
+        {"id":"log-1","at":"2026-08-16T10:05:00.000Z","kind":"decision","stepId":"step-foundation","title":"选择本机 Node 服务","detail":"不依赖云端服务器。"}
+      ],
+      "agents": [
+        {"id":"agent-1","name":"端到端规划对话","focus":"生成完整迁移路线","status":"complete","progress":1,"notes":["完整计划已导入"]}
+      ],
+      "handoff": {
+        "id":"handoff-1","createdAt":"2026-08-16T10:50:00.000Z",
+        "model":"# Agent 交接\n\n继续迁移 Web 功能。",
+        "technical":"# 技术交接\n\nNode localhost 服务，状态 schema v2。"
+      },
+      "artifact": {
+        "title":"Web UI 原型","kind":"html","content":"<!doctype html><html><head><style>body{font-family:sans-serif;padding:30px;color:#202638}button{padding:10px 16px}</style></head><body><h1>Web UI 原型</h1><button onclick=\"document.body.dataset.clicked='yes'\">交互按钮</button></body></html>",
+        "filename":"index.html","projectRoot":null,"files":[],"testCommands":["npm test"],"testResults":["18 tests passed"]
+      },
+      "steps": [
+        {
+          "id":"step-foundation","title":"建立本机运行骨架","purpose":"创建 localhost 服务与本地状态","kind":"build","dependencies":[],"status":"approved",
+          "selectedOptionId":"option-local","revision":1,"lastFeedback":null,"riskLevel":"L1","impactAnalysis":null,
+          "options":[{"id":"option-local","title":"零依赖 Node 服务","subtitle":"降低安装失败点","technicalReason":"使用 Node 内置模块","advantages":["依赖少"],"tradeoffs":["自行维护 UI"],"downstreamImpact":"便于 npm 分发","isRecommended":true}],
+          "result":{"summary":"本机服务已完成。","actualChanges":["新增 Node 服务"],"evidence":["自动测试通过"],"deviation":"无","rollback":"删除 web 目录","verificationPassed":null,"blockingIssues":[],"artifact":null},
+          "conversation":[{"id":"message-1","role":"assistant","text":"本机服务已经完成并通过测试。"}]
+        },
+        {
+          "id":"step-risk","title":"迁移持久化与恢复","purpose":"升级用户状态并保留回滚路径","kind":"integrate","dependencies":["step-foundation"],"status":"review",
+          "selectedOptionId":"option-migrate","revision":2,"lastFeedback":"保留 v1 自动迁移","riskLevel":"L2",
+          "impactAnalysis":{"surfaceProblem":"旧状态必须兼容","problemCategory":"数据迁移","relatedScenarios":["升级","恢复"],"isLocalPatch":false,"scope":"implement","affectedModules":["store","server","UI"],"requiresMainFlowChange":true},
+          "options":[{"id":"option-migrate","title":"版本化自动迁移","subtitle":"保留旧项目","technicalReason":"schema v1 到 v2","advantages":["无感升级"],"tradeoffs":["测试面增加"],"downstreamImpact":"支持全部新功能","isRecommended":true}],
+          "result":{"summary":"状态模型已升级并通过迁移测试。","actualChanges":["新增 schema v2","保留 recovery 副本"],"evidence":["v1→v2 测试通过","检查点测试通过"],"deviation":"尚未真实用户灰度","rollback":"恢复 recovery 状态文件","verificationPassed":true,"blockingIssues":[],"artifact":null},
+          "conversation":[{"id":"message-2","role":"user","text":"保留旧数据。"},{"id":"message-3","role":"assistant","text":"已实现自动迁移。"}]
+        },
+        {
+          "id":"step-verify","title":"验证完整用户路径","purpose":"测试安装、执行、返工和恢复","kind":"verify","dependencies":["step-risk"],"status":"locked",
+          "selectedOptionId":"option-clean","revision":1,"lastFeedback":null,"riskLevel":"L1","impactAnalysis":null,
+          "options":[{"id":"option-clean","title":"干净环境验证","subtitle":"模拟首次用户","technicalReason":"覆盖真实安装路径","advantages":["可信"],"tradeoffs":["需要新环境"],"downstreamImpact":"决定发布","isRecommended":true}],
+          "result":null,"conversation":[]
+        }
+      ]
+    }
+  ]
+}

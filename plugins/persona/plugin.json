@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "persona",
+  "name": "Agent 人格",
+  "kind": "system",
+  "category": "identity",
+  "package": "@deepseek-ai/dsh-persona",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "组合书写的部署人格段：设定 Agent 的身份与系统提示，支持 {{model}}、{{cwd}} 等占位符解析。",
+  "problem": "固定系统提示不适用于所有场景；不同任务需要不同的身份与行为设定。",
+  "audience": "想自定义 Agent 身份、行为风格或系统提示的用户。",
+  "defaultEnabled": true,
+  "usage": "每个 Agent preset 自带人格段，标准模式 / 极简模式 / PTC 模式 / 创造模式都会加载。",
+  "tags": ["人格", "系统提示", "身份"]
+}

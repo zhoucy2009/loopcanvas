@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "cordis",
+  "name": "创造模式",
+  "kind": "agent-preset",
+  "category": "agent-preset",
+  "package": "preset:cordis",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "用于创建自定义 Agent preset：具备标准模式全部能力，并提供运行时检查、插件实验和 preset 创作指导。",
+  "problem": "想定制专属 Agent 需要理解 dsh 的 Cordis 组合机制，但缺少安全的实验环境和创作指引；直接改安装目录有破坏风险。",
+  "audience": "希望打造专属 Agent 模式、编写或实验插件的高级用户。该模式具备运行时操作能力，请按 shell 访问权限对待。",
+  "defaultEnabled": false,
+  "usage": "dsh 设置中选择 Agent 模式为「创造模式」。",
+  "tags": ["模式", "自定义", "preset"]
+}

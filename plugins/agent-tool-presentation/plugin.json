@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "agent-tool-presentation",
+  "name": "Code Mode 呈现",
+  "kind": "presentation",
+  "category": "presentation",
+  "package": "@deepseek-ai/dsh-agent-tool-presentation",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "Agent 平面的呈现选择器：把一个 Agent 的工具组合呈现为 Code Mode、原生工具或两者，供模型编写程序组合多步操作。",
+  "problem": "逐工具调用在多步任务中往返次数多；Code Mode 让模型写一个 TypeScript 程序一次执行一串操作。",
+  "audience": "PTC 模式用户；处理多步骤、可程序化任务的开发者。",
+  "defaultEnabled": false,
+  "usage": "仅在 PTC 模式（code preset）中加载。",
+  "tags": ["Code Mode", "呈现", "SDK"]
+}

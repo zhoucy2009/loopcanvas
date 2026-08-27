@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-workflow",
+  "name": "工作流工具",
+  "kind": "tool",
+  "category": "delegation",
+  "package": "@deepseek-ai/dsh-tool-workflow",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供 workflow 工具：运行 JavaScript 编排脚本，通过 ctx.workflowEngine 批量协调子代理。",
+  "problem": "逐个手写委派调用效率低、难以组织阶段；脚本化编排可以一次协调大批子代理并汇总结果。",
+  "audience": "需要大规模 fan-out、多角度并行研究或迁移审计的用户。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["工作流", "编排", "批量"]
+}

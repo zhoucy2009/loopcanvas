@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-fs",
+  "name": "文件系统工具",
+  "kind": "tool",
+  "category": "filesystem",
+  "package": "@deepseek-ai/dsh-tool-fs",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供文件系统工具（读取、写入、编辑），通过 Harness 的文件系统缝（ctx.fs）操作项目文件。",
+  "problem": "编码任务必须实际改动文件；模型需要受控、可审计的文件访问能力，而不是无界地读写磁盘。",
+  "audience": "所有编码用户；文件读写是交付产物最基本的能力。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["文件", "读写", "基础"]
+}

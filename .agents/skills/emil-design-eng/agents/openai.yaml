@@ -1,0 +1,7 @@
+interface:
+  display_name: "Emil Design Engineering"
+  short_description: "Review restrained UI motion and interaction polish"
+  default_prompt: "Use $emil-design-eng to review this interaction and recommend restrained, purposeful motion."
+
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "cordis-plugin-timer",
+  "name": "定时服务",
+  "kind": "cordis-plugin",
+  "category": "framework",
+  "package": "@deepseek-ai/cordis-plugin-timer",
+  "version": "1.1.3",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "Cordis 定时器服务：为插件提供周期触发、延时调度等基础定时能力。",
+  "problem": "需要周期性或延时触发的能力（定时任务、轮询、心跳）缺少通用基础服务。",
+  "audience": "使用或开发定时能力插件的用户与开发者。",
+  "defaultEnabled": true,
+  "usage": "随 dsh 基础组合加载。",
+  "tags": ["定时", "调度", "服务"]
+}

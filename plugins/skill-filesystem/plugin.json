@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "skill-filesystem",
+  "name": "本地技能发现",
+  "kind": "skill",
+  "category": "retrieval",
+  "package": "@deepseek-ai/dsh-skill-filesystem",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "本地文件系统技能提供器：从项目、用户目录的技能根（.agents/skills 等）发现 SKILL.md 技能。",
+  "problem": "技能散落在项目、用户目录等多个位置时难以统一发现；需要一个本地文件系统提供器把它们收进目录。",
+  "audience": "使用 Skills 的用户；技能分布在多个目录的团队。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载；创造模式额外注入自定义技能目录。",
+  "tags": ["技能", "发现", "SKILL.md"]
+}

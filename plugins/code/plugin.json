@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "code",
+  "name": "PTC 模式",
+  "kind": "agent-preset",
+  "category": "agent-preset",
+  "package": "preset:code",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "具备标准模式的全部能力，并通过 Code Mode SDK 呈现工具：模型用一个 TypeScript 程序组合多步操作，一次执行。",
+  "problem": "常规工具调用下，多步操作需要多轮往返，时延和 token 消耗都偏高；把一连串动作写成一段程序可以一次跑完。",
+  "audience": "处理长链条、多步骤自动化任务的高级用户；愿意接受用 TypeScript 程序表达操作序列的开发者。",
+  "defaultEnabled": false,
+  "usage": "dsh 设置中选择 Agent 模式为「PTC 模式」。",
+  "tags": ["模式", "Code Mode", "自动化"]
+}

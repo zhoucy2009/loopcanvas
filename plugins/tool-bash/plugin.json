@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-bash",
+  "name": "Bash 命令执行",
+  "kind": "tool",
+  "category": "shell",
+  "package": "@deepseek-ai/dsh-tool-bash",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供 bash 工具：在沙盒与权限策略下执行 shell 命令并返回输出，支持可选的后台任务与沙盒升级。",
+  "problem": "编码任务需要运行构建、测试、安装依赖和脚本，模型没有可执行环境就无法验证和交付成果。",
+  "audience": "所有使用 dsh 编码的用户；几乎是每类任务都依赖的基础工具。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载（Windows 上自动替换为 pwsh）。",
+  "tags": ["Shell", "命令", "基础"]
+}

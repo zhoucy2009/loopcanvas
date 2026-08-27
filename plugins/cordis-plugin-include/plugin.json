@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "cordis-plugin-include",
+  "name": "配置包含",
+  "kind": "cordis-plugin",
+  "category": "framework",
+  "package": "@deepseek-ai/cordis-plugin-include",
+  "version": "1.0.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "在 Cordis 配置中通过 include 引用其它配置文件，把组合配置模块化、可复用。",
+  "problem": "组合配置分散在多个文件时难以复用与维护；需要把公共片段抽出来被多处引用。",
+  "audience": "管理复杂 Cordis 组合、维护多 profile 的用户。",
+  "defaultEnabled": true,
+  "usage": "配置加载期生效，随 dsh 基础组合加载。",
+  "tags": ["配置", "include", "模块化"]
+}

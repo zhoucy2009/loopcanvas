@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "cordis-plugin-hmr",
+  "name": "配置热更新",
+  "kind": "cordis-plugin",
+  "category": "framework",
+  "package": "@deepseek-ai/cordis-plugin-hmr",
+  "version": "1.0.16",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "Cordis 热模块替换插件：组合配置变化时热更新已加载的插件，无需整进程重启。",
+  "problem": "修改组合配置后需要重启进程才能生效，开发迭代慢；热更新让配置实验更快。",
+  "audience": "开发、调试插件与组合配置的用户；一般运行用户无需感知。",
+  "defaultEnabled": true,
+  "usage": "随 dsh 基础组合加载；官方 web / headless profile 出于重载生命周期原因显式关闭（disabled: true）。",
+  "tags": ["热更新", "HMR", "开发"]
+}

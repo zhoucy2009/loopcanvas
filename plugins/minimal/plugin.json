@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "minimal",
+  "name": "极简模式",
+  "kind": "agent-preset",
+  "category": "agent-preset",
+  "package": "preset:minimal",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "仅提供持久 bash 与 str_replace_editor 两个工具的极简编码 Agent：固定提示词、双工具、无上下文压缩。",
+  "problem": "完整工具集会引入注意力分散和误操作面；只需要一个稳定的 shell 加精确文本编辑时，工具越少越不容易出错。",
+  "audience": "任务边界清晰、偏好最小工具面、希望把误操作风险压到最低的开发者；也适合作为自建 preset 的起点。",
+  "defaultEnabled": false,
+  "usage": "dsh 设置中选择 Agent 模式为「极简模式」。",
+  "tags": ["模式", "极简", "编码"]
+}

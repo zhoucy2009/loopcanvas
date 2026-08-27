@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-web",
+  "name": "网页检索",
+  "kind": "tool",
+  "category": "retrieval",
+  "package": "@deepseek-ai/dsh-tool-web",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供 web_search / web_fetch 工具：检索网页并抓取内容，让模型获取训练截止时间之后的信息。",
+  "problem": "模型知识有截止时间，无法回答时效性问题和核实最新事实；离线时 Agent 对最新信息一无所知。",
+  "audience": "需要联网调研、查最新资料、核实事实与来源的用户。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。当前官方配置 fetch: false，仅搜索不抓取正文。",
+  "tags": ["搜索", "联网", "调研"]
+}

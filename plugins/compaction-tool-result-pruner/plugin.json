@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "compaction-tool-result-pruner",
+  "name": "工具结果裁剪",
+  "kind": "system",
+  "category": "context",
+  "package": "@deepseek-ai/dsh-compaction-tool-result-pruner",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "对工具结果表面节点做无模型的头/中/尾裁剪（阈值 8192 字符），可重放安全，不依赖 LLM。",
+  "problem": "大工具输出（大文件读取、长列表、grep 洪泛）会快速撑爆上下文；需要确定性的自动裁剪。",
+  "audience": "工具输出量大的用户；处理大文件、长日志的场景。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["裁剪", "上下文", "工具结果"]
+}

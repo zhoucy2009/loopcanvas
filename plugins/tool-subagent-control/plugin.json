@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-subagent-control",
+  "name": "子代理控制",
+  "kind": "tool",
+  "category": "delegation",
+  "package": "@deepseek-ai/dsh-tool-subagent-control",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "提供全局命名的 send_message / interrupt_agent / list_agents 工具，管理 ctx.subagents 上的子代理续对话。",
+  "problem": "委派之后需要与子代理继续通信、中断跑偏的任务、列出所有子代理；缺少统一控制入口。",
+  "audience": "深度使用子代理与并行委派的用户。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["子代理", "控制", "通信"]
+}

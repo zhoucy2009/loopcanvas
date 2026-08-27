@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "agent-instructions",
+  "name": "AGENTS 指令",
+  "kind": "system",
+  "category": "identity",
+  "package": "@deepseek-ai/dsh-agent-instructions",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "工作区上下文加载器：读取 AGENTS.md / CLAUDE.md 指令文件，随每次请求把项目规则下发给 Agent。",
+  "problem": "项目规则（约定、禁令、流程）手工复制容易遗漏或过期；需要随项目自动下发并保持最新。",
+  "audience": "有项目规范、希望规则随项目生效的团队与个人。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载（极简模式不加载）。",
+  "tags": ["AGENTS.md", "规则", "项目规范"]
+}

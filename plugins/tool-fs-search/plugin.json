@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-fs-search",
+  "name": "文件搜索工具",
+  "kind": "tool",
+  "category": "filesystem",
+  "package": "@deepseek-ai/dsh-tool-fs-search",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供文件发现工具（glob、grep），基于打包的 ripgrep 二进制，快速定位路径与内容匹配。",
+  "problem": "大型代码库里手工翻找文件或匹配内容几乎不可行；需要快速、可复现的路径与全文搜索。",
+  "audience": "大型仓库、需要跨文件检索与重构定位的用户。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["搜索", "grep", "glob"]
+}

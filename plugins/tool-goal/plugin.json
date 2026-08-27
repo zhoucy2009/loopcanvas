@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-goal",
+  "name": "目标工具",
+  "kind": "tool",
+  "category": "planning",
+  "package": "@deepseek-ai/dsh-tool-goal",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供同一会话的目标工具（create_goal / update_goal / get_goal），带执行期权限校验，跨轮跟踪长期目标。",
+  "problem": "长目标需要跨多轮持续跟踪，没有目标工具时模型会迷失方向或忘记初衷。",
+  "audience": "需要长周期目标推进、希望目标状态可查询可更新的用户。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["目标", "长期任务", "跟踪"]
+}

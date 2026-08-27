@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-skill",
+  "name": "技能加载工具",
+  "kind": "tool",
+  "category": "retrieval",
+  "package": "@deepseek-ai/dsh-tool-skill",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供技能目录与加载器：按需加载 SKILL.md 技能，把可复用经验变成可调用的能力。",
+  "problem": "把可复用经验写成技能后，需要被模型发现并按需加载；否则技能只能堆在上下文里浪费 token。",
+  "audience": "使用 Skills 复用工作流、希望沉淀团队经验的用户。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["技能", "Skills", "复用"]
+}

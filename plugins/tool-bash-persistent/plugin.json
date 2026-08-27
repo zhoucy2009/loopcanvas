@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-bash-persistent",
+  "name": "持久 Bash",
+  "kind": "tool",
+  "category": "shell",
+  "package": "@deepseek-ai/dsh-tool-bash-persistent",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "提供跨调用保留状态的持久 bash 工具（PTY 后端）：环境变量、工作目录与后台进程在会话内连续。",
+  "problem": "每次调用都重新启动 shell 会丢失环境、目录和进程状态，连续多步的脚本任务难以推进。",
+  "audience": "极简模式用户；需要连续 shell 会话、长脚本任务的场景。",
+  "defaultEnabled": false,
+  "usage": "极简模式的默认 shell 工具；标准模式使用一次性 bash 工具。",
+  "tags": ["Shell", "持久会话", "PTY"]
+}

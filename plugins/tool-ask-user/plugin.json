@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-ask-user",
+  "name": "询问用户",
+  "kind": "tool",
+  "category": "execution",
+  "package": "@deepseek-ai/dsh-tool-ask-user",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为 Agent 提供 ask_user_question 工具：在执行过程中向用户提问，确认选择或补齐缺失信息。",
+  "problem": "需求有歧义、关键选择影响走向时，模型靠猜会跑偏；需要停下来问用户而不是假设。",
+  "audience": "所有用户；重视人机协作、希望关键决策由人拍板的场景。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["提问", "确认", "协作"]
+}

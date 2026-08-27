@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "terminal-bash",
+  "name": "持久 Shell 后端",
+  "kind": "service",
+  "category": "shell",
+  "package": "@deepseek-ai/dsh-terminal-bash",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "为持久 shell 提供 PTY 后端：基于子进程终端原语，支撑交互式程序与持续运行的状态。",
+  "problem": "持久 shell 需要真正的伪终端支持，才能保留交互式程序（如 watch、服务器进程）的状态与输出。",
+  "audience": "一般用户无需直接感知；随「持久 Bash」一起启用即可。",
+  "defaultEnabled": false,
+  "usage": "极简模式内部依赖，与持久 Bash 配对加载。",
+  "tags": ["Shell", "PTY", "服务"]
+}

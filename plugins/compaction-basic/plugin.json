@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "compaction-basic",
+  "name": "基础上下文压缩",
+  "kind": "system",
+  "category": "context",
+  "package": "@deepseek-ai/dsh-compaction-basic",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "基于 token 计量驱动的压缩策略与 LLM 摘要后端：上下文接近窗口上限时自动压缩历史。",
+  "problem": "长会话超出上下文窗口后模型表现明显下降；需要自动压缩历史并保留关键信息。",
+  "audience": "长会话、多轮大任务用户；会话经常跑很长的开发者。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载。",
+  "tags": ["压缩", "上下文", "长会话"]
+}

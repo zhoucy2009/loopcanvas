@@ -141,3 +141,20 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# LoopCanvas project-specific generated and local files
+.DS_Store
+.build/
+.swiftpm/
+dist/
+Deliverables/
+backups/
+Bridge/harness-backups/
+Bridge/requests/
+Bridge/responses/
+Bridge/diagnostics/
+Bridge/test-artifacts/
+Bridge/attachments/
+
+# Keep shareable environment templates, never real environment files
+!.env.*.example

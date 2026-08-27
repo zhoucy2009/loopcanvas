@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "tool-pwsh",
+  "name": "PowerShell 命令执行",
+  "kind": "tool",
+  "category": "shell",
+  "package": "@deepseek-ai/dsh-tool-pwsh",
+  "version": "0.1.0-rc.6",
+  "source": "https://github.com/deepseek-ai/deepseek-harness",
+  "license": "MIT",
+  "author": "DeepSeek AI",
+  "description": "Windows 平台上的 pwsh 工具：通过同一命令执行缝运行 PowerShell 命令并返回输出。",
+  "problem": "非 Windows 平台使用 bash，而 Windows 上需要 PowerShell 才能执行命令；平台差异需要自动适配。",
+  "audience": "Windows 用户；在 Windows 上替代 bash 工具。",
+  "defaultEnabled": true,
+  "usage": "标准模式 / PTC 模式 / 创造模式默认加载（仅 Windows 生效）。",
+  "tags": ["Shell", "Windows", "命令"]
+}

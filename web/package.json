@@ -1,0 +1,33 @@
+{
+  "name": "dshwf-web",
+  "version": "0.1.0",
+  "description": "LoopCanvas 本机 Web UI：通过用户自己的 DeepSeek Harness 逐步规划、执行与验收。",
+  "type": "module",
+  "bin": {
+    "dshwf-web": "bin/loopcanvas.js"
+  },
+  "scripts": {
+    "start": "node ./bin/loopcanvas.js",
+    "test": "node --test",
+    "check": "node --check ./src/server.js && node --check ./src/remote.js && node --check ./src/agent-prompt.js && node --check ./src/harness.js && node --check ./src/codex.js && node --check ./src/artifact-validator.js && node --check ./src/diagnostics.js && node --check ./src/conversations.js && node --check ./src/plugins.js && node --check ./src/source-browser.js && node --check ./src/source-content.js && node --check ./public/learning-reference.js && node --check ./public/preview-trace.js && node --check ./public/app-v2.js",
+    "prepack": "node -e \"const{cpSync,rmSync}=require('node:fs');rmSync('plugins',{recursive:true,force:true});cpSync('../plugins','plugins',{recursive:true});\"",
+    "postpack": "node -e \"require('node:fs').rmSync('plugins',{recursive:true,force:true});\""
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "README.md",
+    "plugins"
+  ],
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4"
+  }
+}
