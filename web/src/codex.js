@@ -3,7 +3,9 @@ import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { buildAgentPrompt } from "./agent-prompt.js";
+import { resolveModelRoute, smartRoutingEnabled } from "./smart-routing.js";
 
 const MAX_STREAM_BYTES = 32 * 1024 * 1024;
 
@@ -68,6 +70,7 @@ function createClient(executable, { cwd, signal, timeoutMs = 30 * 60 * 1000 } = 
   });
   let nextId = 0;
   let stdoutBuffer = "";
+  const stdoutDecoder = new StringDecoder("utf8");
   let stderr = "";
   let fatalError = null;
   let closing = false;
@@ -111,7 +114,7 @@ function createClient(executable, { cwd, signal, timeoutMs = 30 * 60 * 1000 } = 
     if (message.method) deliverNotification(message);
   };
   child.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk.toString("utf8");
+    stdoutBuffer += stdoutDecoder.write(chunk);
     if (Buffer.byteLength(stdoutBuffer) > MAX_STREAM_BYTES) return fail(new Error("Codex App Server 单条输出超过 32 MiB，已停止解析。"));
     while (true) {
       const newline = stdoutBuffer.indexOf("\n");
@@ -137,12 +140,19 @@ function createClient(executable, { cwd, signal, timeoutMs = 30 * 60 * 1000 } = 
     if (fatalError) throw fatalError;
     child.stdin.write(`${JSON.stringify(message)}\n`);
   };
-  const request = (method, params = {}) => new Promise((resolve, reject) => {
+  const request = (method, params = {}, { timeoutMs: requestTimeoutMs = 0 } = {}) => new Promise((resolve, reject) => {
     if (fatalError) return reject(fatalError);
     const id = nextId++;
-    pending.set(id, { resolve, reject });
+    const requestTimer = requestTimeoutMs > 0 ? setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`Codex ${method} 查询超时。`));
+    }, requestTimeoutMs) : null;
+    pending.set(id, {
+      resolve: (value) => { clearTimeout(requestTimer); resolve(value); },
+      reject: (error) => { clearTimeout(requestTimer); reject(error); }
+    });
     try { send({ method, id, params }); }
-    catch (error) { pending.delete(id); reject(error); }
+    catch (error) { clearTimeout(requestTimer); pending.delete(id); reject(error); }
   });
   const notify = (method, params = {}) => send({ method, params });
   const nextNotification = () => {
@@ -183,8 +193,11 @@ function compactText(value, maximum = 120) {
   return text.length > maximum ? `${text.slice(0, maximum - 1)}…` : text;
 }
 
-function activityForItem(item = {}) {
-  if (item.type === "commandExecution") return `运行命令：${compactText(item.command || "本机命令")}`;
+function activityForItem(item = {}, completed = false) {
+  if (item.type === "reasoning") return completed ? null : "Codex 正在处理当前节点";
+  if (item.type === "agentMessage") return completed && item.phase === "commentary"
+    ? compactText(item.text, 180) : "Codex 正在整理回复";
+  if (item.type === "commandExecution") return `${completed ? "命令已结束" : "运行命令"}：${compactText(item.command || "本机命令")}`;
   if (item.type === "fileChange") {
     const paths = (item.changes ?? []).map((change) => change.path).filter(Boolean);
     return paths.length ? `修改文件：${paths.slice(0, 2).join("、")}${paths.length > 2 ? ` 等 ${paths.length} 个文件` : ""}` : "修改工作区文件";
@@ -194,7 +207,7 @@ function activityForItem(item = {}) {
   if (item.type === "webSearch") return `检索：${compactText(item.query || "公开资料")}`;
   if (item.type === "imageView") return `查看图像：${compactText(item.path || "图像文件")}`;
   if (item.type === "contextCompaction") return "压缩上下文以继续执行";
-  return "Codex 正在分析当前子进程";
+  return null;
 }
 
 function metricsFromCodex(tokenUsage, accountUsage, rateLimits) {
@@ -272,18 +285,39 @@ export async function invokeCodex(request, settings, options = {}, signal, onEve
   const executable = await resolveCodex(executableSettings(settings));
   if (!executable) throw new Error("未找到 Codex。请确认 Codex CLI 或 ChatGPT macOS 应用已安装。");
   const workspace = path.resolve(options.workspace ?? settings.workspace);
-  await mkdir(workspace, { recursive: true });
-  const writable = request.kind === "route_project" || request.kind === "execute_step" || request.kind === "execute_project";
-  const client = createClient(executable, { cwd: workspace, signal });
+  const route = resolveModelRoute(request, settings);
+  onEvent?.({ type: "route", route });
+  const legacyWritable = request.kind === "route_project" || request.kind === "execute_step" || request.kind === "execute_project";
+  const writable = smartRoutingEnabled(settings, request) ? route.role === "executor" : legacyWritable;
+  let workingDirectory = workspace;
+  if (writable) await mkdir(workspace, { recursive: true });
+  else await access(workspace).catch(() => { workingDirectory = os.tmpdir(); });
+  const client = createClient(executable, { cwd: workingDirectory, signal });
   try {
     await initialize(client);
+    if (route.routed) {
+      const catalog = [];
+      let cursor = null;
+      do {
+        const page = await client.request("model/list", { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) });
+        catalog.push(...(Array.isArray(page?.data) ? page.data : []));
+        cursor = page?.nextCursor || null;
+      } while (cursor && catalog.length < 500);
+      const selected = catalog.find((item) => String(item.model || item.id) === route.model);
+      if (!selected) throw new Error(`${route.role} 需要模型 ${route.model}，但本机 Codex 模型目录中不可用。`);
+      const supportedEfforts = (Array.isArray(selected.supportedReasoningEfforts) ? selected.supportedReasoningEfforts : []).map((item) => String(item.reasoningEffort || "")).filter(Boolean);
+      if (route.effort && !supportedEfforts.includes(route.effort)) throw new Error(`${route.model} 的本机模型目录未明确包含 ${route.role} 所需的 ${route.effort} 推理强度。`);
+      onEvent?.({ type: "route", route: { ...route, catalogValidated: true, actualModel: String(selected.model || selected.id), actualEffort: route.effort } });
+    }
     onEvent?.({ type: "activity", activity: "连接 Codex App Server" });
-    const accountUsagePromise = client.request("account/usage/read", {}).catch(() => null);
-    const rateLimitsPromise = client.request("account/rateLimits/read", {}).catch(() => null);
-    const model = String(settings.codexModel || "").trim();
-    const effort = String(settings.codexReasoningEffort || "").trim();
+    // Optional telemetry must never hold a completed result until the turn timeout.
+    const telemetryOptions = { timeoutMs: 1500 };
+    const accountUsagePromise = client.request("account/usage/read", {}, telemetryOptions).catch(() => null);
+    const rateLimitsPromise = client.request("account/rateLimits/read", {}, telemetryOptions).catch(() => null);
+    const model = String(route.model || settings.codexModel || "").trim();
+    const effort = String(route.effort || settings.codexReasoningEffort || "").trim();
     const threadResult = await client.request("thread/start", {
-      cwd: workspace,
+      cwd: workingDirectory,
       approvalPolicy: "never",
       sandbox: writable ? "workspace-write" : "read-only",
       ephemeral: true,
@@ -312,13 +346,20 @@ export async function invokeCodex(request, settings, options = {}, signal, onEve
       const params = message.params ?? {};
       if (message.method === "item/agentMessage/delta" && params.itemId && typeof params.delta === "string") {
         deltas.set(params.itemId, `${deltas.get(params.itemId) ?? ""}${params.delta}`);
+        onEvent?.({ type: "heartbeat" });
       } else if (message.method === "item/started") {
         onEvent?.({ type: "activity", activity: activityForItem(params.item), item: params.item });
       } else if (message.method === "item/completed" && params.item) {
         const itemError = codexErrorDetail(params.item.error ?? (params.item.status === "failed" ? params.item : null));
         if (itemError) itemErrors.push(itemError);
-        if (params.item.type === "agentMessage" && String(params.item.text || "").trim()) finalMessages.push(String(params.item.text));
-        onEvent?.({ type: "activity", activity: activityForItem(params.item), item: params.item });
+        if (params.item.type === "agentMessage" && params.item.phase !== "commentary" && String(params.item.text || "").trim()) finalMessages.push(String(params.item.text));
+        onEvent?.({ type: "activity", activity: activityForItem(params.item, true), item: params.item });
+      } else if (["item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/commandExecution/outputDelta"].includes(message.method)) {
+        // Record liveness without exposing reasoning or raw command output.
+        onEvent?.({ type: "heartbeat" });
+      } else if (message.method === "turn/plan/updated") {
+        const current = params.plan?.find((entry) => entry.status === "inProgress");
+        if (current?.step) onEvent?.({ type: "activity", activity: `正在执行：${compactText(current.step, 180)}` });
       } else if (message.method === "thread/tokenUsage/updated") {
         tokenUsage = params.tokenUsage ?? null;
         onEvent?.({ type: "metrics", metrics: metricsFromCodex(tokenUsage, null, null) });
@@ -331,9 +372,9 @@ export async function invokeCodex(request, settings, options = {}, signal, onEve
         }
         const final = finalMessages.at(-1) || [...deltas.values()].at(-1) || "";
         if (!final.trim()) throw new Error("Codex 回合完成但没有 agentMessage 文本。");
+        onEvent?.({ type: "activity", activity: "Codex 已返回结果，正在校验产物" });
         const [accountUsage, rateLimits] = await Promise.all([accountUsagePromise, rateLimitsPromise]);
         onEvent?.({ type: "metrics", metrics: metricsFromCodex(tokenUsage, accountUsage, rateLimits) });
-        onEvent?.({ type: "activity", activity: "Codex 已返回结果，正在校验产物" });
         return final;
       }
     }

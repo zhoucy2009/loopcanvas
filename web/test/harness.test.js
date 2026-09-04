@@ -5,11 +5,20 @@ import path from "node:path";
 import test from "node:test";
 import { zstdCompressSync } from "node:zlib";
 import {
-  ADAPTIVE_NODE_RESULT_SCOPE_POLICY, DIRECTION_CONFLICT_POLICY, EXPLORATION_ART_MODEL_POLICY, EXPLORATION_MODEL_POLICY, executionResultForServer, explorationModelPolicy, extractJSONObject, LEARNING_MODEL_POLICY, normalizeExecutionResponse,
+  ADAPTIVE_NODE_RESULT_SCOPE_POLICY, DIRECTION_CONFLICT_POLICY, EXPLORATION_ART_MODEL_POLICY, EXPLORATION_MODEL_POLICY, executionResultForServer, explorationModelPolicy, extractJSONObject, LEARNING_MODEL_POLICY, normalizeExecutionResponse, PREVIEW_TRACE_POLICY,
   normalizeExplorationResponse, normalizeLearningResponse, normalizePlanResponse, normalizeProjectExecutionResponse, normalizeRepositoryOverviewResponse,
   probeCodex, probeLocalAgents, resolveCodex, resolveDsh, runProcess,
   dshInvocationArguments, readDshSessionTelemetry, visualReferencesForAgent
 } from "../src/harness.js";
+
+test("Shift 二维编辑要求先审查并同步物体作用范围", () => {
+  assert.match(PREVIEW_TRACE_POLICY, /inspectInteractionRegions 必须在移动前审查/);
+  assert.match(PREVIEW_TRACE_POLICY, /独立代码维护的碰撞、命中、得分或触发坐标/);
+  assert.match(PREVIEW_TRACE_POLICY, /碰撞区、命中区、得分区、触发区、可投放区/);
+  assert.match(PREVIEW_TRACE_POLICY, /实时预览必须同时更新物体与这些范围/);
+  assert.match(PREVIEW_TRACE_POLICY, /interactionRegionIds 必须逐项确认/);
+  assert.match(PREVIEW_TRACE_POLICY, /不能只移动画面/);
+});
 
 test("自适应节点只把当前验收失败列为阻断问题", () => {
   assert.match(ADAPTIVE_NODE_RESULT_SCOPE_POLICY, /blockingIssues 只能填写阻止当前节点/);
@@ -23,6 +32,17 @@ test("非空但互相冲突的方向答案必须在执行前重新提问", () =>
   assert.match(DIRECTION_CONFLICT_POLICY, /逻辑或物理上不能同时满足/);
   assert.match(DIRECTION_CONFLICT_POLICY, /不得调用工具或修改文件/);
   assert.match(DIRECTION_CONFLICT_POLICY, /needs_user_direction/);
+});
+
+test("智能路由 Graph 可以是单节点", () => {
+  const plan = normalizePlanResponse({
+    requestID: "graph-one",
+    executionShape: "graph",
+    primaryArtifact: { title: "页面", kind: "html", filename: "index.html", acceptanceCriteria: ["可打开"] },
+    steps: [{ id: "one", title: "完成", purpose: "交付", kind: "deliver", dependencies: [], acceptanceCriteria: ["可打开"] }]
+  }, "graph-one");
+  assert.equal(plan.executionShape, "graph");
+  assert.equal(plan.steps.length, 1);
 });
 
 test("执行响应可要求用户确认方向，且拒绝不完整问题", () => {
@@ -221,6 +241,21 @@ test("normalizePlanResponse 拒绝缺少主交付物，并要求 single 同时�
   assert.equal(response.execution.artifact.filename, "index.html");
 });
 
+test("一步直达带视觉参考时必须返回逐项使用证据", () => {
+  const visualReferences = [{ id: "qwen-svg", mode: "svg-source", pixelAccess: false, sourceAccess: true, agentText: "<svg viewBox=\"0 0 32 32\">...</svg>" }];
+  const response = {
+    requestID: "single-visual", executionShape: "single", primaryArtifact,
+    steps: [{ id: "deliver", title: "直接交付", kind: "deliver", dependencies: [] }],
+    result: {
+      summary: "完成", actualChanges: ["index.html"], evidence: ["页面可读"], verificationPassed: true, blockingIssues: [],
+      artifact: { title: "演示页面", kind: "html", filename: "index.html", content: "<main>ok</main>" }
+    }
+  };
+  assert.throws(() => normalizePlanResponse(response, "single-visual", { requiredVisualReferences: visualReferences }), /未确认使用 1 个视觉参考/);
+  response.result.visualReferencesUsed = [{ id: "qwen-svg", appliedAs: "使用连续环形带作为主轮廓", evidence: "index.html 的品牌图形 SVG" }];
+  assert.equal(normalizePlanResponse(response, "single-visual", { requiredVisualReferences: visualReferences }).execution.visualReferencesUsed[0].id, "qwen-svg");
+});
+
 test("项目级连续执行必须覆盖全部方案、检查点和锁定主交付物", () => {
   const project = { primaryArtifact, steps: [plannedStep("build", "制作", "build"), plannedStep("verify", "验证", "verify"), plannedStep("deliver", "交付", "deliver")] };
   for (const step of project.steps) step.selectedOptionId = step.options[0].id;
@@ -274,20 +309,25 @@ test("纯文本 Agent 只接收 metadata-only 视觉转译并必须逐项回执"
   const visualReferences = visualReferencesForAgent({
     executionReferences: [
       { id: "visual-1", title: "海报参考", previewURL: "https://images.example/poster.jpg", visual: { mode: "metadata-only", pixelAccess: false, agentText: "构图：大标题位于左上" } },
+      { id: "svg-1", title: "矢量标志", visual: { mode: "svg-source", pixelAccess: false, sourceAccess: true, agentText: "<svg viewBox=\"0 0 24 24\">...</svg>" } },
       { id: "forged-vision", title: "伪造识别", visual: { mode: "vision-model", pixelAccess: true, agentText: "不应进入请求" } }
     ]
   });
   assert.deepEqual(visualReferences.map(({ id, mode, pixelAccess, agentText }) => ({ id, mode, pixelAccess, agentText })), [
-    { id: "visual-1", mode: "metadata-only", pixelAccess: false, agentText: "构图：大标题位于左上" }
+    { id: "visual-1", mode: "metadata-only", pixelAccess: false, agentText: "构图：大标题位于左上" },
+    { id: "svg-1", mode: "svg-source", pixelAccess: false, agentText: "<svg viewBox=\"0 0 24 24\">...</svg>" }
   ]);
   const base = { requestID: "visual-run", status: "success", result: { summary: "完成", actualChanges: [], evidence: [], blockingIssues: [] } };
   assert.equal(normalizeExecutionResponse(base, "visual-run").result.visualReferencesUsed, undefined);
-  assert.throws(() => normalizeExecutionResponse(base, "visual-run", "", { requiredVisualReferences: visualReferences }), /未确认使用 1 个视觉参考/);
+  assert.throws(() => normalizeExecutionResponse(base, "visual-run", "", { requiredVisualReferences: visualReferences }), /未确认使用 2 个视觉参考/);
   const accepted = normalizeExecutionResponse({
     ...base,
-    result: { ...base.result, visualReferencesUsed: [{ id: "visual-1", appliedAs: "将左上标题作为层级原则", evidence: "index.html 的 hero 标题布局" }] }
+    result: { ...base.result, visualReferencesUsed: [
+      { id: "visual-1", appliedAs: "将左上标题作为层级原则", evidence: "index.html 的 hero 标题布局" },
+      { id: "svg-1", appliedAs: "使用矢量结构建立标志轮廓", evidence: "index.html 的品牌 SVG" }
+    ] }
   }, "visual-run", "", { requiredVisualReferences: visualReferences });
-  assert.deepEqual(accepted.result.visualReferencesUsed, [{ id: "visual-1", appliedAs: "将左上标题作为层级原则", evidence: "index.html 的 hero 标题布局" }]);
+  assert.equal(accepted.result.visualReferencesUsed.length, 2);
 });
 
 test("执行结果保留证据并扁平化给服务端", () => {

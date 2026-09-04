@@ -7,11 +7,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   analyzeDirectives, answerStepDirection, appendContext, appendLog, approveStep, applyAdaptiveRoute, applyPlan, executionReadiness, generateHandoff, moveStep,
-  readyAdaptiveSteps, recoverInterruptedAdaptiveExecution, rejectStep, reopenStep, returnVerificationToRepair, rollbackStep, setStepCaution, StateStore
+  readyAdaptiveSteps, recoverInterruptedAdaptiveExecution, rejectStep, reopenForRepair, reopenStep, returnVerificationToRepair, rollbackStep, setStepCaution, StateStore
 } from "./store.js";
 import {
   executeProjectWithHarness, executeWithHarness, executionResultForServer, exploreWithHarness, installationStatus, learnWithHarness,
-  normalizeProjectExecutionResponse, planWithHarness,
+  finalReviewWithHarness, normalizeProjectExecutionResponse, planWithHarness, reviewStepWithHarness,
   listCodexModels, probeHarness, probeLocalAgents, resolveProjectWorkspace, runProcess, summarizeRepositoryWithHarness,
   tracePreviewWithHarness
 } from "./harness.js";
@@ -28,7 +28,11 @@ import { listConversationRecords, readConversationRecord, writeConversationRecor
 import { buildDshPluginPatch, DSH_PLUGIN_RUNTIME_VERSION, listPlugins } from "./plugins.js";
 import { buildRepositoryOverviewDocuments, findPreviewSourceCandidates, isSupportedSourceFile, listSourceFiles, parseGitHubRepositoryURL, readSourceDocument, readSourceFile, readSourceSelection } from "./source-browser.js";
 import { extractPublicSource } from "./source-content.js";
+import { applyDirectSourceEdit, applyDOMGeometryToSource, isDeclarativeGeometrySource, validateDirectSourceEdit } from "./geometry-edit.js";
 import { RemoteManager, startRemoteServer as startRemoteListener } from "./remote.js";
+import { createRuntimePreviewManager, isRuntimePreviewArtifact, runtimePreviewProjectId, runtimePreviewTracePath } from "./runtime-preview.js";
+import { VoiceWakeBroker } from "./voice-wake.js";
+import { AgentPresence } from "./agent-presence.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.resolve(here, "..", "public");
@@ -217,6 +221,22 @@ function assertPrimaryArtifactMatches(project, result) {
   }
 }
 
+function isPrimaryArtifact(project, artifact) {
+  return Boolean(artifact && (!project.primaryArtifact
+    || (artifact.filename === project.primaryArtifact.filename && artifact.kind === project.primaryArtifact.kind)));
+}
+
+async function validateAdaptiveNodeResult(project, step, result) {
+  // Every artifact still receives file, evidence and resource-safety validation.
+  await validateStepResult(step, result, { requireArtifact: false });
+  if (result.verificationPassed === false || result.blockingIssues?.length) throw new Error(adaptiveResultFailureMessage(step, result));
+  // Intermediate documents belong to their node, not the locked final deliverable.
+  // A node claiming the primary filename must still use the correct artifact kind.
+  if (step.kind === "deliver" || result.artifact?.filename === project.primaryArtifact?.filename) {
+    assertPrimaryArtifactMatches(project, result);
+  }
+}
+
 function commitAdaptiveSingle(project, route) {
   const now = new Date().toISOString();
   const step = project.steps[0];
@@ -240,18 +260,85 @@ function commitAdaptiveStep(project, stepId, executed) {
   const step = project.steps.find((item) => item.id === stepId);
   if (!step) throw new Error("执行节点已不存在。");
   const now = new Date().toISOString();
-  step.status = "approved";
+  const review = executed.agentReview ?? null;
+  step.routing = executed.route ? {
+    role: executed.route.role,
+    model: executed.route.model,
+    effort: executed.route.effort,
+    available: executed.route.available,
+    reason: executed.route.selection || executed.route.fallbackReason || "",
+    executorLabel: executed.route.available === false
+      ? `${executed.route.requestedModel ?? "Codex 智能路由"} 不可用 · 当前 ${executed.route.model}`
+      : `${executed.route.model || "当前模型"} · ${executed.route.effort || "默认"}`
+  } : step.routing ?? null;
+  step.agentReview = review ? {
+    verdict: review.verdict,
+    summary: review.summary,
+    findings: review.findings ?? [],
+    verifiedEvidence: review.verifiedEvidence ?? [],
+    reviewedRevision: review.reviewedRevision,
+    route: review.route ?? null,
+    at: now
+  } : step.agentReview ?? null;
   step.result = executed.result;
+  step.reviewPending = false;
   step.lastError = null;
   step.conversation.push({ id: randomUUID(), role: "assistant", text: executed.result.assistantMessage, subprocessId: null });
-  if (executed.result.artifact) {
+  if (isPrimaryArtifact(project, executed.result.artifact)) {
     project.artifact = executed.result.artifact;
     project.artifactStepId = step.id;
     project.artifactSubprocessId = null;
   }
   appendContext(project, "result", executed.result.summary, step.id, "自适应节点 Agent");
-  appendLog(project, "execution", "节点已完成", `${step.title}：${executed.result.summary}`, step.id);
+  if (review && review.verdict !== "pass") {
+    step.status = "ready";
+    step.revision = (step.revision ?? 1) + 1;
+    step.repairFindings = review.findings ?? [];
+    step.lastFeedback = [review.summary, ...(review.findings ?? []).map((item) => item.repairInstruction).filter(Boolean)].join("；").slice(0, 8_000);
+    project.artifact = null;
+    project.artifactStepId = null;
+    project.artifactSubprocessId = null;
+    project.executionRun = { ...(project.executionRun ?? {}), status: "ready", completedAt: null, error: null, awaitingStepIds: [] };
+    project.pendingAction = null;
+    appendLog(project, "review", `${review.route?.available === false ? "当前审核 Agent（不可用回退）" : "审核 Agent"} 退回`, `${step.title}：${review.summary}`, step.id);
+    project.updatedAt = now;
+    return false;
+  }
+  step.status = "approved";
+  appendLog(project, "review", review ? "审核 Agent 通过" : "节点已完成（兼容模式）", `${step.title}：${review?.summary ?? executed.result.summary}`, step.id);
   project.updatedAt = now;
+  return true;
+}
+
+function routeLabel(route, fallback = "当前 Agent") {
+  if (!route) return fallback;
+  const model = route.actualModel || route.model || route.requestedModel || fallback;
+  const effort = route.actualEffort || route.effort || route.requestedEffort || "默认";
+  return route.available === false ? `${route.requestedModel || "智能路由"} 不可用 · 当前 ${model} · ${effort}` : `${model} · ${effort}`;
+}
+
+function repairFeedbackForStep(step) {
+  const parts = [step?.lastFeedback, ...(step?.repairFindings ?? []).map((item) => item?.repairInstruction)]
+    .map((item) => String(item ?? "").trim()).filter(Boolean);
+  return [...new Set(parts)].join("；").slice(0, 8_000);
+}
+
+function minimalRepairStepIds(project, stepIds = []) {
+  const candidates = new Set(stepIds.filter((id) => project.steps.some((step) => step.id === id)));
+  const hasCandidateAncestor = (step) => {
+    const pending = [...(step?.dependencies ?? [])];
+    const seen = new Set();
+    while (pending.length) {
+      const id = pending.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (candidates.has(id)) return true;
+      const dependency = project.steps.find((item) => item.id === id);
+      pending.push(...(dependency?.dependencies ?? []));
+    }
+    return false;
+  };
+  return [...candidates].filter((id) => !hasCandidateAncestor(project.steps.find((step) => step.id === id)));
 }
 
 function adaptiveResultFailureMessage(step, result) {
@@ -336,6 +423,85 @@ function normalizeTransferReference(input = {}) {
     };
   }
   return reference;
+}
+
+function svgSourceURL(reference) {
+  for (const value of [reference.previewURL, reference.url]) {
+    if (!value) continue;
+    try {
+      const url = new URL(value);
+      const pathname = decodeURIComponent(url.pathname);
+      const isCommonsFilePage = /(?:^|\.)wikimedia\.org$/i.test(url.hostname) && /^\/wiki\/File:/i.test(pathname);
+      if (/\.svg$/i.test(pathname) && !isCommonsFilePage) return url.href;
+    } catch {}
+  }
+  const filename = reference.title.replace(/^File:\s*/i, "").trim();
+  try {
+    const page = new URL(reference.url);
+    if (/\.svg$/i.test(filename) && /(?:^|\.)wikimedia\.org$/i.test(page.hostname)) {
+      return `https://commons.wikimedia.org/wiki/Special:Redirect/file/${encodeURIComponent(filename)}`;
+    }
+  } catch {}
+  return "";
+}
+
+async function hydrateSVGReference(reference, extractor = extractPublicSource) {
+  const sourceURL = svgSourceURL(reference);
+  if (!sourceURL) return reference;
+  let lastError;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const extracted = await extractor({ url: sourceURL });
+      if (!/<svg\b/i.test(extracted.content)) throw new Error("来源没有返回可读取的 SVG 源码。");
+      const source = extracted.content.slice(0, 60_000);
+      reference.extractedContent = source;
+      reference.extractionStatus = "success";
+      reference.extractedAt = new Date().toISOString();
+      reference.extractionAttemptedAt = reference.extractedAt;
+      reference.extractionMetadata = { ...extracted.metadata, sourceURL, attempts: attempt };
+      reference.extractionError = "";
+      reference.visual = {
+        mode: "svg-source",
+        pixelAccess: false,
+        sourceAccess: true,
+        basis: "公开 SVG 矢量源码、来源说明和结构化元数据",
+        agentText: [
+          "视觉参考（svg-source；可读取矢量源码，但未读取栅格像素）",
+          `标题：${reference.title}`,
+          `来源：${reference.sourceName || reference.url || sourceURL}`,
+          `创作者：${reference.creator || "未知"}`,
+          `许可：${reference.license || "未知"}`,
+          `来源提供的视觉说明：${reference.visualDescription || reference.summary || "未提供"}`,
+          "SVG 源码开始：",
+          source,
+          "SVG 源码结束。",
+          "使用限制：可以依据源码中的 viewBox、路径、几何、配色与比例提炼视觉原则；不得声称读取了未提供的像素内容。"
+        ].join("\n")
+      };
+      return reference;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  reference.extractionStatus = "failed";
+  reference.extractionAttemptedAt = new Date().toISOString();
+  reference.extractionError = String(lastError?.message || "SVG 源码读取失败。").slice(0, 1_000);
+  return reference;
+}
+
+async function hydrateProjectSVGReferences(project, store, extractor = extractPublicSource) {
+  const candidates = (project.executionReferences ?? []).filter((reference) =>
+    reference?.visual?.mode !== "svg-source" && svgSourceURL(reference)
+  );
+  if (!candidates.length) return;
+  const hydrated = await Promise.all(candidates.map((reference) => hydrateSVGReference(structuredClone(reference), extractor)));
+  await store.mutate(() => {
+    for (const incoming of hydrated) {
+      const stored = project.executionReferences?.find((reference) => reference.id === incoming.id);
+      if (stored) Object.assign(stored, incoming);
+    }
+    project.updatedAt = new Date().toISOString();
+  });
 }
 
 function executionReferenceContextContent(reference) {
@@ -477,12 +643,72 @@ function securedPreviewHTML(source, dependencies = [], projectId = "") {
   return `<!doctype html><html><head><meta charset="utf-8">${headInjection}</head><body>${html}</body></html>`;
 }
 
+function artifactSourceManifest(artifact) {
+  return [...new Set([artifact?.filename, ...(artifact?.files ?? [])].map((item) => String(item ?? "").replaceAll("\\", "/").trim()).filter(Boolean))];
+}
+
+async function writeArtifactSource(projectRoot, relativePath, content) {
+  const boundary = path.resolve(projectRoot);
+  const candidate = path.resolve(boundary, relativePath);
+  const relative = path.relative(boundary, candidate);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("几何编辑源码路径超出项目工作目录。");
+  const source = await readSourceFile(boundary, relativePath);
+  const temporary = path.join(path.dirname(candidate), `.${path.basename(candidate)}.loopcanvas-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, content, "utf8");
+    await rename(temporary, candidate);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => null);
+    throw error;
+  }
+  return source.path;
+}
+
+async function prepareGeometrySourceChange(project, body) {
+  const artifact = project.artifact;
+  if (!artifact) throw new Error("当前项目没有可二维编辑的图形预览。");
+  const direct = body.sourceEdit ? validateDirectSourceEdit(body.sourceEdit) : null;
+  if (direct) {
+    if (!artifact.projectRoot) throw new Error("Canvas 内部对象必须来自有工作目录的源码产物。");
+    if (!artifactSourceManifest(artifact).includes(direct.path)) throw new Error("Canvas 适配器只能替换当前产物清单内的源码。");
+    const source = await readSourceFile(artifact.projectRoot, direct.path);
+    const patched = applyDirectSourceEdit(source.content, direct);
+    return { path: source.path, content: patched.content, edit: body.geometry, anchor: String(body.target?.traceId || body.target?.groupId || "canvas-adapter"), mode: "canvas-source-replace" };
+  }
+  if (artifact.kind !== "html") throw new Error("这个运行时界面需要 Canvas/Three 适配器提供精确源码替换，不能凭坐标猜改组件代码。");
+  const manifest = artifactSourceManifest(artifact).filter(isDeclarativeGeometrySource);
+  if (!artifact.projectRoot) {
+    const patched = applyDOMGeometryToSource(String(artifact.content ?? ""), body.target, body.geometry);
+    return { path: artifact.filename || "index.html", content: patched.content, edit: patched.edit, anchor: patched.anchor, mode: "dom-geometry" };
+  }
+  const matches = [];
+  let ambiguity = null;
+  for (const relativePath of manifest) {
+    const source = await readSourceFile(artifact.projectRoot, relativePath).catch(() => null);
+    if (!source) continue;
+    try {
+      const patched = applyDOMGeometryToSource(source.content, body.target, body.geometry);
+      matches.push({ path: source.path, content: patched.content, edit: patched.edit, anchor: patched.anchor, mode: "dom-geometry" });
+    } catch (error) {
+      if (/不唯一/.test(error.message)) ambiguity = error;
+      else if (!/找不到精确元素锚点/.test(error.message)) throw error;
+    }
+  }
+  if (ambiguity) throw ambiguity;
+  if (matches.length !== 1) throw new Error(matches.length ? "元素锚点在多个源码文件中出现，已拒绝凭推测改代码。" : "当前产物源码中找不到唯一锚点，未改动代码。");
+  return matches[0];
+}
+
 export async function createLoopCanvasServer(options = {}) {
+  const agentPresence = new AgentPresence();
   const dataDirectory = options.dataDirectory ?? defaultDataDirectory;
   const workspace = options.workspace ?? defaultWorkspace;
-  const planRunner = options.planWithHarness ?? planWithHarness;
-  const executeRunner = options.executeWithHarness ?? executeWithHarness;
-  const executeProjectRunner = options.executeProjectWithHarness ?? executeProjectWithHarness;
+  const planRunner = agentPresence.wrap("plan", options.planWithHarness ?? planWithHarness);
+  const executeRunner = agentPresence.wrap("execute", options.executeWithHarness ?? executeWithHarness);
+  const executeProjectRunner = agentPresence.wrap("execute", options.executeProjectWithHarness ?? executeProjectWithHarness);
+  const reviewRunner = agentPresence.wrap("review", options.reviewStepWithHarness ?? reviewStepWithHarness);
+  const finalReviewRunner = agentPresence.wrap("review", options.finalReviewWithHarness ?? finalReviewWithHarness);
+  const enforceAgentReviewChain = options.enforceAgentReviewChain ?? !options.executeWithHarness;
   const exploreRunner = options.exploreWithHarness ?? exploreWithHarness;
   const sourceContentExtractor = options.extractPublicSource ?? extractPublicSource;
   const previewDependencyFetcher = options.fetchPreviewDependency ?? fetch;
@@ -497,7 +723,9 @@ export async function createLoopCanvasServer(options = {}) {
   const pendingLearningImports = new Map();
   await store.load();
   const remoteManager = options.remoteManager ?? await new RemoteManager({ dataDirectory, ...(options.remote ?? {}) }).load();
+  const runtimePreviewManager = options.runtimePreviewManager ?? createRuntimePreviewManager(options.runtimePreview ?? {});
   const token = randomBytes(24).toString("base64url");
+  const voiceWake = new VoiceWakeBroker();
   const busyProjects = new Set();
   const activeControllers = new Map();
   const activeModeCalls = new Set();
@@ -505,6 +733,7 @@ export async function createLoopCanvasServer(options = {}) {
   const runtimeMetrics = new Map();
   const writeConversationRecord = (_directory, input = {}) => persistConversationRecord(dataDirectory, {
     ...input,
+    agentRoute: input.agentRoute ?? runtimeStates.get(input.projectId)?.agentRoute ?? null,
     runtime: input.runtime
       ?? runtimeStates.get(input.projectId)?.runtime
       ?? (store.state.settings.agentRuntime === "codex" ? "codex" : "dsh")
@@ -523,14 +752,24 @@ export async function createLoopCanvasServer(options = {}) {
     const step = project?.steps.find((item) => item.id === stepId);
     updateRuntime(projectId, {
       runtime,
+      ...(event.type === "route" && event.route ? { agentRoute: event.route, activity: `${event.route.role} · ${event.route.actualModel || event.route.model || event.route.requestedModel || "当前模型"} · ${event.route.actualEffort || event.route.effort || event.route.requestedEffort || "默认"}` } : {}),
       ...(event.activity ? { activity: String(event.activity) } : {}),
       ...(step ? { percent: completedStepPercent(step), stepId: step.id, stepTitle: step.title } : {})
     });
   };
   const runtimePayload = (project) => {
     const runtime = store.state.settings.agentRuntime === "codex" ? "codex" : "dsh";
+    const active = busyProjects.has(project.id);
+    const saved = runtimeStates.get(project.id);
+    const error = project.lastError || project.pendingAction?.error || project.executionRun?.error;
+    const activity = !active && (project.isPaused || project.executionRun?.status === "cancelled") ? "执行已暂停"
+      : !active && error ? `执行失败：${error}`
+      : !active && project.phase === "complete" ? "全部节点已验证并交付"
+      : !active && saved?.active ? "执行已结束"
+      : saved?.activity ?? "等待自动执行";
     return {
-      ...(runtimeStates.get(project.id) ?? { active: false, activity: "等待自动执行", percent: null, updatedAt: null }),
+      ...(saved ?? { percent: null, updatedAt: null }),
+      active, activity,
       runtime,
       metrics: runtimeMetrics.get(metricKey(project.id, runtime)) ?? null
     };
@@ -589,10 +828,25 @@ export async function createLoopCanvasServer(options = {}) {
   const server = http.createServer(async (request, response) => {
     try {
       const host = request.headers.host ?? "";
-      if (!/^(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host)) {
+      const runtimeProjectId = runtimePreviewProjectId(host);
+      if (!runtimeProjectId && !/^(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host)) {
         return json(response, 403, { error: "Host 已拒绝。" });
       }
       const url = new URL(request.url ?? "/", `http://${host}`);
+      if (runtimeProjectId) {
+        if (!["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(request.method)) return json(response, 405, { error: "请求方法不支持。" });
+        if (url.pathname === runtimePreviewTracePath && ["GET", "HEAD"].includes(request.method)) {
+          const candidate = path.join(publicRoot, "preview-trace.js");
+          const info = await stat(candidate);
+          response.writeHead(200, { "Content-Type": mimeTypes[".js"], "Content-Length": info.size, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+          if (request.method === "HEAD") return response.end();
+          return createReadStream(candidate).pipe(response);
+        }
+        const project = projectOrThrow(store, runtimeProjectId);
+        if (!isRuntimePreviewArtifact(project.artifact)) return json(response, 404, { error: "当前产物没有可运行的图形预览。" });
+        await runtimePreviewManager.proxy(project, request, response);
+        return;
+      }
       const isAPI = url.pathname.startsWith("/api/");
       if (isAPI && request.method !== "GET" && request.headers["x-loopcanvas-token"] !== token) {
         return json(response, 403, { error: "会话令牌无效，请刷新页面。" });
@@ -670,11 +924,25 @@ export async function createLoopCanvasServer(options = {}) {
       if (request.method === "GET" && url.pathname === "/api/bootstrap") {
         return json(response, 200, {
           token,
+          voiceWakeVersion: 1,
+          agentPresence: agentPresence.snapshot(),
           state: publicState(store, busyProjects),
           installation: await installationStatus(store.state.settings),
           runtime: { version: "0.1.0", address: "仅本机 127.0.0.1" },
           remote: remoteManager.publicStatus()
         });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/agents/presence") {
+        return json(response, 200, agentPresence.snapshot());
+      }
+      if (request.method === "POST" && url.pathname === "/api/voice/wake") {
+        const event = voiceWake.create(await readJSON(request), store.project(store.state.activeProjectId));
+        return json(response, 201, event);
+      }
+      const voiceWakeClaim = url.pathname.match(/^\/api\/voice\/wake\/([\da-f-]+)\/claim$/i);
+      if (request.method === "POST" && voiceWakeClaim) {
+        return json(response, 200, { event: voiceWake.claim(voiceWakeClaim[1]) });
       }
 
       if (request.method === "GET" && url.pathname === "/api/remote/status") {
@@ -933,10 +1201,67 @@ export async function createLoopCanvasServer(options = {}) {
         return json(response, 200, { record: await readConversationRecord(dataDirectory, conversationMatch[1], conversationMatch[2]) });
       }
 
+      const designApplyMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/design\/apply$/);
+      if (request.method === "POST" && designApplyMatch) {
+        const project = projectOrThrow(store, designApplyMatch[1]);
+        if (busyProjects.has(project.id)) throw new Error("项目正在执行，暂时不能覆盖产物源码。");
+        const body = await readJSON(request);
+        if (!body.target || typeof body.target !== "object" || JSON.stringify(body.target).length > 8_000) throw new Error("二维编辑目标无效。");
+        const change = await prepareGeometrySourceChange(project, body);
+        if (project.artifact.projectRoot) await writeArtifactSource(project.artifact.projectRoot, change.path, change.content);
+        const now = new Date().toISOString();
+        let record;
+        await store.mutate(() => {
+          if (!project.artifact.projectRoot || change.path === project.artifact.filename) project.artifact.content = change.content;
+          project.artifact.geometryEdits ??= [];
+          record = {
+            id: randomUUID(), at: now, mode: change.mode, path: change.path, anchor: change.anchor,
+            original: change.edit?.original ?? body.geometry?.original ?? null,
+            final: change.edit?.final ?? body.geometry?.final ?? null,
+            corners: change.edit?.corners ?? body.geometry?.corners ?? [],
+            interactionRegions: change.edit?.interactionRegions ?? body.geometry?.interactionRegions ?? []
+          };
+          project.artifact.geometryEdits.unshift(record);
+          if (project.artifact.geometryEdits.length > 50) project.artifact.geometryEdits.length = 50;
+          project.updatedAt = now;
+          appendLog(project, "decision", "二维坐标已直接写回源码", `${change.path} · ${change.anchor}`);
+        });
+        return json(response, 200, { edit: record, state: publicState(store, busyProjects) });
+      }
+
+      const reviseProjectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/revise$/);
+      if (request.method === "POST" && reviseProjectMatch) {
+        const project = projectOrThrow(store, reviseProjectMatch[1]);
+        if (busyProjects.has(project.id)) throw new Error("这个项目已有任务正在执行，请等待当前调用结束后再提交返修。");
+        const { feedback } = await readJSON(request);
+        const normalized = String(feedback ?? "").trim().slice(0, 20_000);
+        if (!normalized) throw new Error("请先说明整体需要怎样修改。");
+        const step = project.steps.find((item) => item.id === project.artifactStepId)
+          ?? [...project.steps].reverse().find((item) => ["review", "approved"].includes(item.status));
+        if (!step) throw new Error("当前产物没有可重新打开的完成步骤。");
+        await store.mutate(() => {
+          const now = new Date().toISOString();
+          if (step.status === "review") rejectStep(project, step.id, normalized);
+          else if (step.status === "approved") reopenStep(project, step.id, normalized);
+          else throw new Error(`当前步骤处于“${step.status}”，不能发起整体返修。`);
+          project.phase = "workspace";
+          project.pendingAction = null;
+          project.lastError = null;
+          if (project.executionMode === "continuous") {
+            project.executionRun = { ...(project.executionRun ?? {}), status: "cancelled", completedAt: now, error: null };
+          } else if (project.executionMode?.startsWith("adaptive")) {
+            project.executionRun = { ...(project.executionRun ?? {}), status: "ready", completedAt: null, error: null, awaitingStepIds: [] };
+          }
+          appendLog(project, "revision", "从演示窗口发起整体返修", normalized, step.id);
+          project.updatedAt = now;
+        });
+        return json(response, 200, { stepId: step.id, repairQueued: !project.isPaused, state: publicState(store, busyProjects) });
+      }
+
       const debugLocateMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/debug\/locate$/);
       if (request.method === "POST" && debugLocateMatch) {
         const project = projectOrThrow(store, debugLocateMatch[1]);
-        if (!project.artifact || project.artifact.kind !== "html") throw new Error("当前项目没有可回溯的 HTML 预览。");
+        if (!project.artifact || (project.artifact.kind !== "html" && !isRuntimePreviewArtifact(project.artifact))) throw new Error("当前项目没有可回溯的图形预览。");
         const body = await readJSON(request);
         const step = project.steps.find((item) => item.id === project.artifactStepId)
           ?? [...project.steps].reverse().find((item) => item.result?.artifact || item.subprocesses?.some((subprocess) => subprocess.result?.artifact));
@@ -1414,18 +1739,30 @@ export async function createLoopCanvasServer(options = {}) {
       const executionReferenceMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/references$/);
       if (request.method === "POST" && executionReferenceMatch) {
         const project = projectOrThrow(store, executionReferenceMatch[1]);
-        const reference = normalizeTransferReference((await readJSON(request)).reference);
+        const reference = await hydrateSVGReference(normalizeTransferReference((await readJSON(request)).reference), sourceContentExtractor);
         const duplicate = (project.executionReferences ?? []).find((item) => item.url && item.url === reference.url || (!item.url && item.title === reference.title && item.summary === reference.summary));
-        if (!duplicate) {
-          await store.mutate(() => {
+        await store.mutate(() => {
+          if (duplicate) {
+            Object.assign(duplicate, {
+              extractedContent: reference.extractedContent,
+              extractedAt: reference.extractedAt,
+              extractionAttemptedAt: reference.extractionAttemptedAt,
+              extractionStatus: reference.extractionStatus,
+              extractionMetadata: reference.extractionMetadata,
+              extractionError: reference.extractionError,
+              visual: reference.visual
+            });
+            const contextItem = project.context?.find((item) => item.id === duplicate.contextId);
+            if (contextItem) contextItem.content = executionReferenceContextContent(duplicate);
+          } else {
             project.executionReferences ??= [];
             project.executionReferences.unshift(reference);
             if (project.executionReferences.length > 30) project.executionReferences.length = 30;
             reference.contextId = appendContext(project, "reference", executionReferenceContextContent(reference), null, "用户拖入").id;
             appendLog(project, "decision", "加入跨模式执行参考", reference.title);
-            project.updatedAt = reference.createdAt;
-          });
-        }
+          }
+          project.updatedAt = new Date().toISOString();
+        });
         return json(response, 200, { reference: duplicate ?? reference, state: publicState(store, busyProjects) });
       }
 
@@ -1454,33 +1791,42 @@ export async function createLoopCanvasServer(options = {}) {
         const query = String(body.query ?? "").trim();
         const requestedKind = body.kind === "art" ? "art" : "research";
         if (!query) throw new Error("请输入要探索的问题。");
-        const callKey = `explore:${project?.id ?? "global"}`;
-        if (activeModeCalls.has(callKey)) throw new Error("当前范围已有探索请求正在进行。");
         const collection = project ? (project.explorationThreads ??= []) : store.state.explorationThreads;
         const existing = body.threadId ? collection.find((item) => item.id === body.threadId) : null;
         if (body.threadId && !existing) throw new Error("探索对话不存在，请新建探索。");
-        const kind = existing?.kind === "art" ? "art" : requestedKind;
+        const kind = existing ? (existing.kind === "art" ? "art" : "research") : requestedKind;
         if (existing && requestedKind !== kind) throw new Error("探索类型与已有对话不一致，请新建探索。");
+        // Independent pages may run together, but one conversation must stay ordered.
+        const callKey = JSON.stringify(["explore", project?.id ?? null, existing ? "thread" : "page", existing?.id ?? String(body.pageId || randomUUID())]);
+        if (activeModeCalls.has(callKey)) throw new Error("这个搜索页面正在检索，请等待完成或新建搜索页。");
         activeModeCalls.add(callKey);
         try {
           const explored = await exploreRunner({ project: project ? structuredClone(project) : null, query, history: structuredClone(existing?.messages ?? []), kind }, await harnessSettings({ requiredPlugins: ["tool-web"] }));
           const now = new Date().toISOString();
           let thread = existing;
           await store.mutate(() => {
+            // Other operations can replace state while the network request is running.
+            const currentProject = project ? store.project(project.id)
+              ?? store.state.archivedProjects.find((item) => item.id === project.id) : null;
+            if (project && !currentProject) throw new Error("搜索所属项目已不存在，无法保存结果。");
+            const currentCollection = currentProject ? (currentProject.explorationThreads ??= []) : store.state.explorationThreads;
+            thread = existing ? currentCollection.find((item) => item.id === existing.id) : null;
+            if (existing && !thread) throw new Error("搜索对话已发生变化，请新建搜索页。");
             if (!thread) {
               thread = { id: randomUUID(), title: query.slice(0, 56), kind, projectId: project?.id ?? null, createdAt: now, updatedAt: now, messages: [] };
-              collection.unshift(thread);
-              const sameKindThreads = collection.filter((item) => (item.kind === "art" ? "art" : "research") === kind);
+              currentCollection.unshift(thread);
+              const sameKindThreads = currentCollection.filter((item) => (item.kind === "art" ? "art" : "research") === kind);
               for (const stale of sameKindThreads.slice(40)) {
-                const staleIndex = collection.findIndex((item) => item.id === stale.id);
-                if (staleIndex >= 0) collection.splice(staleIndex, 1);
+                if (activeModeCalls.has(JSON.stringify(["explore", project?.id ?? null, "thread", stale.id]))) continue;
+                const staleIndex = currentCollection.findIndex((item) => item.id === stale.id);
+                if (staleIndex >= 0) currentCollection.splice(staleIndex, 1);
               }
             }
             thread.kind ??= kind;
             thread.messages.push({ id: randomUUID(), role: "user", text: query, at: now });
             thread.messages.push({ id: randomUUID(), role: "assistant", text: explored.result.answer, at: now, details: explored.result });
             thread.updatedAt = now;
-            if (project) project.updatedAt = now;
+            if (currentProject) currentProject.updatedAt = now;
           });
           await writeConversationRecord(dataDirectory, { projectId: project?.id ?? "global-exploration", operation: "explore", status: "success", request: explored.request, output: explored.rawOutput }).catch(() => null);
           return json(response, 200, { thread: structuredClone(thread) });
@@ -1560,6 +1906,7 @@ export async function createLoopCanvasServer(options = {}) {
           project.attachments.push(...claimed.filter((item) => !hashes.has(item.sha256)));
           state.draftAttachments = state.draftAttachments.filter((item) => !selected.has(item.id));
         });
+        await hydrateProjectSVGReferences(project, store, sourceContentExtractor);
         busyProjects.add(project.id);
         const controller = new AbortController();
         activeControllers.set(project.id, controller);
@@ -1574,6 +1921,7 @@ export async function createLoopCanvasServer(options = {}) {
         try {
           const planned = await planRunner(structuredClone(project), await harnessSettings(), controller.signal, recordAgentEvent(project.id, runtime));
           if (!ownsProjectCall(activeControllers, project.id, controller) || controller.signal.aborted) throw new Error("任务已暂停，Agent 进程已取消。");
+          if (store.state.settings.smartRouting !== false && planned.result.executionShape !== "graph") throw new Error("智能路由规划必须返回 Graph；已拒绝会绕过独立执行与审核链的 single 结果。");
           if (planned.result.executionShape === "single") {
             await recoverPrimaryArtifact(planned.result.primaryArtifact, project.workspace, planned.result.execution);
             await validateStepResult(planned.result.steps[0], planned.result.execution, { requireArtifact: true });
@@ -1581,7 +1929,7 @@ export async function createLoopCanvasServer(options = {}) {
           }
           await store.mutate(() => {
             applyAdaptiveRoute(project, planned.result);
-            if (planned.result.executionShape === "single") {
+            if (planned.result.executionShape === "single" && store.state.settings.smartRouting === false) {
               assertPrimaryArtifactMatches(project, planned.result.execution);
               commitAdaptiveSingle(project, planned.result);
             } else {
@@ -1634,10 +1982,61 @@ export async function createLoopCanvasServer(options = {}) {
         const project = projectOrThrow(store, adaptiveDirectionMatch[1]);
         if (busyProjects.has(project.id)) throw new Error("节点正在执行，不能提交方向答复。");
         const { answer = "", optionId = "", supplemental = "" } = await readJSON(request);
+        const requireAgentReview = store.state.settings.smartRouting !== false && enforceAgentReviewChain;
         await store.mutate(() => {
           answerStepDirection(project, adaptiveDirectionMatch[2], { answer, optionId, supplemental });
+          if (requireAgentReview) project.steps.find((step) => step.id === adaptiveDirectionMatch[2]).status = "review";
           project.executionRun = { ...(project.executionRun ?? {}), status: "ready", error: null, awaitingStepIds: [] };
         });
+        if (requireAgentReview) {
+          const step = project.steps.find((item) => item.id === adaptiveDirectionMatch[2]);
+          busyProjects.add(project.id);
+          const controller = new AbortController();
+          activeControllers.set(project.id, controller);
+          const runtime = store.state.settings.agentRuntime === "codex" ? "codex" : "dsh";
+          try {
+            updateRuntime(project.id, { active: true, runtime, activity: `审核者正在检查方向：${step.title}`, stepId: step.id, stepTitle: step.title });
+            const review = await reviewRunner({ project: structuredClone(project), step: structuredClone(step), result: structuredClone(step.result) }, await harnessSettings(), controller.signal, recordAgentEvent(project.id, runtime, step.id));
+            await store.mutate(() => {
+              const recordedReview = { verdict: review.verdict, summary: review.summary, findings: review.findings ?? [], verifiedEvidence: review.verifiedEvidence ?? [], route: review.route ?? null, reviewedRevision: review.reviewedRevision, at: new Date().toISOString() };
+              step.agentReview = recordedReview;
+              if (review.verdict === "pass") {
+                step.status = "approved";
+                readyAdaptiveSteps(project);
+              } else {
+                const feedback = [review.summary, ...(review.findings ?? []).map((item) => item.repairInstruction).filter(Boolean)].join("；").slice(0, 8_000);
+                reopenForRepair(project, step.id, feedback, null, review.findings ?? []);
+                step.agentReview = recordedReview;
+                step.directionAnswer = "";
+                step.selectedDirectionOptionId = null;
+                step.directionSupplement = "";
+                project.executionRun = { ...(project.executionRun ?? {}), status: "awaiting_direction", error: null, awaitingStepIds: [step.id] };
+              }
+              appendLog(project, "review", review.verdict === "pass" ? "方向审核通过" : "方向审核要求重新确认", review.summary, step.id);
+            });
+            updateRuntime(project.id, { active: false, activity: review.verdict === "pass" ? "方向审核通过" : "方向需要重新确认", stepId: step.id, stepTitle: step.title });
+          } catch (error) {
+            if (ownsProjectCall(activeControllers, project.id, controller)) {
+              await store.mutate(() => {
+                step.status = "ready";
+                step.result = null;
+                step.agentReview = null;
+                step.directionAnswer = "";
+                step.selectedDirectionOptionId = null;
+                step.directionSupplement = "";
+                step.lastError = error.message;
+                project.lastError = `方向审核失败：${error.message}`;
+                project.executionRun = { ...(project.executionRun ?? {}), status: "awaiting_direction", error: error.message, awaitingStepIds: [step.id] };
+                project.pendingAction = null;
+                appendLog(project, "review", "方向审核失败，已恢复待确认", error.message, step.id);
+              });
+            }
+            updateRuntime(project.id, { active: false, activity: `方向审核失败：${error.message}`, stepId: step.id, stepTitle: step.title });
+            throw error;
+          } finally {
+            releaseProjectCall(activeControllers, busyProjects, project.id, controller);
+          }
+        }
         return json(response, 200, { state: publicState(store, busyProjects) });
       }
 
@@ -1650,9 +2049,11 @@ export async function createLoopCanvasServer(options = {}) {
         }
         if (project.isPaused) throw new Error("任务已暂停，请先继续。");
         if (busyProjects.has(project.id)) throw new Error("这个项目已有任务正在执行。");
+        await hydrateProjectSVGReferences(project, store, sourceContentExtractor);
         const body = await readJSON(request);
         let schedulingMode = ["ask", "sequential", "parallel"].includes(body.mode) ? body.mode : "ask";
         const requestedStepId = String(body.stepId ?? "").trim();
+        if (busyProjects.has(project.id)) throw new Error("这个项目已有任务正在执行。");
         busyProjects.add(project.id);
         const controller = new AbortController();
         activeControllers.set(project.id, controller);
@@ -1696,19 +2097,49 @@ export async function createLoopCanvasServer(options = {}) {
             }
             if (!ready.length) {
               if (!project.steps.every((step) => step.status === "approved")) throw new Error("执行图没有可运行节点；依赖关系可能形成死锁。");
-              const carrier = [...project.steps].reverse().find((step) => step.result)?.result;
-              if (!carrier) throw new Error("执行图完成但没有节点结果。");
+              if (store.state.settings.smartRouting !== false && enforceAgentReviewChain && project.steps.some((step) => step.agentReview?.verdict !== "pass")) {
+                throw new Error("智能路由不能进入最终审核：仍有节点缺少 Sol high 独立审核通过记录。");
+              }
+              const lastResult = [...project.steps].reverse().find((step) => step.result)?.result;
+              if (!lastResult) throw new Error("执行图完成但没有节点结果。");
+              // A final verification report must not replace the actual deliverable.
+              const carrier = structuredClone(lastResult);
+              if (!isPrimaryArtifact(project, carrier.artifact)) {
+                carrier.artifact = isPrimaryArtifact(project, project.artifact) ? structuredClone(project.artifact) : null;
+              }
               await recoverPrimaryArtifact(project.primaryArtifact, project.workspace, carrier);
               await validateStepResult({ ...project.steps.at(-1), kind: "deliver" }, carrier, { requireArtifact: true });
               assertPrimaryArtifactMatches(project, carrier);
               if (carrier.verificationPassed !== true || carrier.blockingIssues?.length) throw new Error("最终交付验证未通过或仍有阻断问题。");
+              let finalReview = null;
+              if (store.state.settings.smartRouting !== false && enforceAgentReviewChain) {
+                await store.mutate(() => {
+                  project.artifact = carrier.artifact;
+                  project.phase = "final_review";
+                  project.finalReview = { status: "running", verdict: null, summary: "", findings: [], at: new Date().toISOString() };
+                });
+                updateRuntime(project.id, { active: true, activity: "裁决者正在最终审核", percent: 100 });
+                finalReview = await finalReviewRunner(structuredClone(project), settings, controller.signal, recordAgentEvent(project.id, runtime));
+              }
               await store.mutate(() => {
                 project.artifact = carrier.artifact;
-                project.phase = "complete";
-                project.executionRun = { ...(project.executionRun ?? {}), status: "completed", completedAt: new Date().toISOString(), error: null, awaitingStepIds: [] };
+                project.finalReview = finalReview ? { status: finalReview.verdict === "pass" ? "passed" : finalReview.verdict, verdict: finalReview.verdict, summary: finalReview.summary, findings: finalReview.findings ?? [], acceptanceResults: finalReview.acceptanceResults ?? [], repairStepIds: finalReview.repairStepIds ?? [], route: finalReview.route ?? null, at: new Date().toISOString() } : project.finalReview ?? null;
+                project.phase = !finalReview || finalReview.verdict === "pass" ? "complete" : "workspace";
+                project.executionRun = { ...(project.executionRun ?? {}), status: !finalReview || finalReview.verdict === "pass" ? "completed" : "ready", completedAt: !finalReview || finalReview.verdict === "pass" ? new Date().toISOString() : null, error: null, awaitingStepIds: [] };
                 project.pendingAction = null;
                 project.lastError = null;
-                appendLog(project, "execution", "自适应执行图已交付", carrier.summary, project.steps.at(-1)?.id ?? null);
+                if (finalReview && finalReview.verdict !== "pass") {
+                  for (const stepId of minimalRepairStepIds(project, finalReview.repairStepIds ?? [])) {
+                    const repairStep = project.steps.find((item) => item.id === stepId);
+                    if (!repairStep || repairStep.status !== "approved") continue;
+                    const findings = (finalReview.findings ?? []).filter((item) => !item.criterion || (finalReview.acceptanceResults ?? []).some((result) => result.criterion === item.criterion && !result.passed));
+                    const instructions = findings.map((item) => item.repairInstruction).filter(Boolean).join("；");
+                    reopenForRepair(project, stepId, [finalReview.summary, instructions].filter(Boolean).join("；"), null, findings);
+                  }
+                  appendLog(project, "review", "最终审核要求返修", finalReview.summary, finalReview.repairStepIds?.[0] ?? null);
+                } else {
+                  appendLog(project, "review", finalReview ? "最终审核 Agent 通过" : "兼容模式交付", finalReview?.summary ?? carrier.summary, project.steps.at(-1)?.id ?? null);
+                }
               });
               break;
             }
@@ -1748,27 +2179,48 @@ export async function createLoopCanvasServer(options = {}) {
             });
             updateRuntime(project.id, { active: true, runtime, activity: batch.length > 1 ? `并行执行 ${batch.length} 个节点` : `执行节点：${batch[0].title}`, percent: null, stepId: batch[0].id, stepTitle: batch[0].title });
             const snapshot = structuredClone(project);
-            const executedBatch = await Promise.all(batch.map((step) => {
+            const settledBatch = await Promise.allSettled(batch.map((step) => {
               const snapshotStep = snapshot.steps.find((item) => item.id === step.id);
-              return executeRunner(snapshot, snapshotStep, settings, "", controller.signal, recordAgentEvent(project.id, runtime, step.id));
+              return executeRunner(snapshot, snapshotStep, settings, repairFeedbackForStep(snapshotStep), controller.signal, recordAgentEvent(project.id, runtime, step.id));
             }));
             if (!ownsProjectCall(activeControllers, project.id, controller) || controller.signal.aborted) throw new Error("任务已暂停，Agent 进程已取消。");
+            // Do not release the project lock while a sibling is still writing.
+            // Keep completed siblings so a retry cannot accidentally run them twice.
+            for (let index = 0; index < batch.length; index += 1) {
+              const outcome = settledBatch[index];
+              if (outcome.status === "rejected" && outcome.reason?.completedExecution) {
+                try {
+                  await validateAdaptiveNodeResult(project, batch[index], outcome.reason.completedExecution.result);
+                  outcome.execution = outcome.reason.completedExecution;
+                } catch (reason) { outcome.reason = reason; }
+              }
+              if (outcome.status !== "fulfilled" || outcome.value.needsUserDirection) continue;
+              try { await validateAdaptiveNodeResult(project, batch[index], outcome.value.result); }
+              catch (reason) { settledBatch[index] = { status: "rejected", reason, execution: outcome.value }; }
+            }
+            if (settledBatch.some((outcome) => outcome.status === "rejected")) {
+              await store.mutate(() => {
+                settledBatch.forEach((outcome, index) => {
+                  if (outcome.status !== "fulfilled") return;
+                  const step = batch[index], executed = outcome.value;
+                  if (executed.needsUserDirection) {
+                    Object.assign(step, { requiresUserDirection: true, directionQuestion: executed.directionQuestion, directionOptions: executed.directionOptions, selectedDirectionOptionId: null, directionSupplement: "", directionAnswer: "", status: "ready", lastError: null });
+                  } else commitAdaptiveStep(project, step.id, executed);
+                });
+              });
+              await Promise.all(settledBatch.map((outcome, index) => outcome.status === "fulfilled"
+                ? writeConversationRecord(dataDirectory, { projectId: project.id, operation: "execute-node", status: outcome.value.needsUserDirection ? "awaiting_user_direction" : "success", request: outcome.value.request, output: outcome.value.rawOutput, nodeId: batch[index].id }).catch(() => null)
+                : null));
+              const failures = settledBatch.flatMap((outcome, index) => outcome.status === "rejected" ? [{ ...outcome, step: batch[index] }] : []);
+              const error = new Error(failures.map(({ step, reason }) => `${step.title}：${reason?.message || reason}`).join("；"));
+              error.executedStepIds = failures.map(({ step }) => step.id);
+              error.executedBatch = failures.map(({ execution, reason }) => execution ?? { request: reason?.executionContext?.request, rawOutput: reason?.executionContext?.rawOutput });
+              throw error;
+            }
+            const executedBatch = settledBatch.map((outcome) => outcome.value);
             const clarificationIndexes = executedBatch.map((executed, index) => executed?.needsUserDirection ? index : -1).filter((index) => index >= 0);
             if (clarificationIndexes.length) {
-              try {
-                for (let index = 0; index < batch.length; index += 1) {
-                  if (clarificationIndexes.includes(index)) continue;
-                  const step = batch[index];
-                  const executed = executedBatch[index];
-                  await validateStepResult(step, executed.result, { requireArtifact: false });
-                  if (executed.result.verificationPassed === false || executed.result.blockingIssues?.length) throw new Error(adaptiveResultFailureMessage(step, executed.result));
-                  assertPrimaryArtifactMatches(project, executed.result);
-                }
-              } catch (error) {
-                error.executedBatch = executedBatch.filter((executed) => !executed?.needsUserDirection);
-                error.executedStepIds = batch.filter((_step, index) => !clarificationIndexes.includes(index)).map((step) => step.id);
-                throw error;
-              }
+              let repairRequested = false;
               await store.mutate(() => {
                 for (let index = 0; index < batch.length; index += 1) {
                   const step = batch[index];
@@ -1784,10 +2236,11 @@ export async function createLoopCanvasServer(options = {}) {
                     step.lastError = null;
                     appendLog(project, "decision", "Agent 请求用户确认", executed.directionQuestion, step.id);
                   } else {
-                    commitAdaptiveStep(project, step.id, executed);
+                    if (!commitAdaptiveStep(project, step.id, executed)) repairRequested = true;
                   }
                 }
-                project.executionRun = { ...(project.executionRun ?? {}), status: "running", awaitingStepIds: [], error: null };
+                project.executionRun = { ...(project.executionRun ?? {}), status: repairRequested ? "ready" : "running", awaitingStepIds: [], error: null };
+                if (repairRequested) project.pendingAction = null;
               });
               await Promise.all(executedBatch.map((executed, index) => writeConversationRecord(dataDirectory, {
                 projectId: project.id,
@@ -1799,28 +2252,19 @@ export async function createLoopCanvasServer(options = {}) {
               }).catch(() => null)));
               activeStepIds = [];
               if (schedulingMode === "parallel") schedulingMode = "ask";
+              if (repairRequested) break;
               continue;
             }
-            try {
-              for (let index = 0; index < batch.length; index += 1) {
-                const step = batch[index];
-                const executed = executedBatch[index];
-                await validateStepResult(step, executed.result, { requireArtifact: false });
-                if (executed.result.verificationPassed === false || executed.result.blockingIssues?.length) throw new Error(adaptiveResultFailureMessage(step, executed.result));
-                assertPrimaryArtifactMatches(project, executed.result);
-              }
-            } catch (error) {
-              error.executedBatch = executedBatch;
-              error.executedStepIds = batch.map((step) => step.id);
-              throw error;
-            }
+            let repairRequested = false;
             await store.mutate(() => {
-              for (let index = 0; index < batch.length; index += 1) commitAdaptiveStep(project, batch[index].id, executedBatch[index]);
-              project.executionRun = { ...(project.executionRun ?? {}), status: "running", awaitingStepIds: [], error: null };
+              for (let index = 0; index < batch.length; index += 1) if (!commitAdaptiveStep(project, batch[index].id, executedBatch[index])) repairRequested = true;
+              project.executionRun = { ...(project.executionRun ?? {}), status: repairRequested ? "ready" : "running", awaitingStepIds: [], error: null };
+              if (repairRequested) project.pendingAction = null;
             });
             await Promise.all(executedBatch.map((executed, index) => writeConversationRecord(dataDirectory, { projectId: project.id, operation: "execute-node", status: "success", request: executed.request, output: executed.rawOutput, nodeId: batch[index].id }).catch(() => null)));
             activeStepIds = [];
             if (schedulingMode === "parallel") schedulingMode = "ask";
+            if (repairRequested) break;
             if (requestedStepId && !project.steps.every((step) => step.status === "approved")) {
               await store.mutate(() => {
                 project.executionRun = { ...(project.executionRun ?? {}), status: "ready", error: null, awaitingStepIds: [] };
@@ -1830,6 +2274,8 @@ export async function createLoopCanvasServer(options = {}) {
             }
           }
           updateRuntime(project.id, { active: false, activity: project.executionRun?.status === "completed" ? "全部节点已验证并交付" : project.executionRun?.status === "awaiting_direction" ? "等待目标方向答复" : project.executionRun?.status === "ready" ? "等待手动执行" : "等待并行方式选择", percent: project.executionRun?.status === "completed" ? 100 : null, stepId: project.selectedStepId, stepTitle: project.steps.find((step) => step.id === project.selectedStepId)?.title ?? null });
+          // The returned snapshot must not claim a finished request is still busy.
+          releaseProjectCall(activeControllers, busyProjects, project.id, controller);
           return json(response, 200, { state: publicState(store, busyProjects) });
         } catch (error) {
           if (ownsProjectCall(activeControllers, project.id, controller)) {
@@ -1838,7 +2284,10 @@ export async function createLoopCanvasServer(options = {}) {
             await store.mutate(() => {
               for (const step of project.steps.filter((item) => activeStepIds.includes(item.id) && item.status === "running")) {
                 const capturedIndex = capturedStepIds.indexOf(step.id);
-                if (capturedIndex >= 0 && capturedExecutions[capturedIndex]?.result) step.result = capturedExecutions[capturedIndex].result;
+                if (capturedIndex >= 0 && capturedExecutions[capturedIndex]?.result) {
+                  step.result = capturedExecutions[capturedIndex].result;
+                  step.reviewPending = capturedExecutions[capturedIndex].reviewPending === true;
+                }
                 step.status = "error";
                 step.lastError = error.message;
               }
@@ -1934,10 +2383,12 @@ export async function createLoopCanvasServer(options = {}) {
       if (request.method === "POST" && continuousExecuteMatch) {
         const project = projectOrThrow(store, continuousExecuteMatch[1]);
         const { feedback = "" } = await readJSON(request);
+        if (store.state.settings.smartRouting !== false) throw new Error("智能路由要求逐节点执行、Sol high 审核和最终裁决；连续单 Agent 模式仅可在关闭智能路由后用于旧项目。");
         if (project.executionMode !== "continuous") throw new Error("这个历史项目仍使用逐步执行模式。");
         if (!project.steps.length || !project.primaryArtifact) throw new Error("项目尚未生成包含主交付物的成果路线。");
         if (project.steps.some((step) => ["L2", "L3"].includes(step.riskLevel))) throw new Error("成果路线包含高风险节点，需要先逐项确认，不能连续自动执行。");
         if (busyProjects.has(project.id)) throw new Error("这个项目已有任务正在执行。");
+        await hydrateProjectSVGReferences(project, store, sourceContentExtractor);
         busyProjects.add(project.id);
         const controller = new AbortController();
         activeControllers.set(project.id, controller);
@@ -2021,6 +2472,7 @@ export async function createLoopCanvasServer(options = {}) {
         const step = project.steps.find((item) => item.id === executeMatch[2]);
         const { feedback = "", subprocessId = "" } = await readJSON(request);
         if (!step) throw new Error("步骤不存在或计划已经更新。");
+        await hydrateProjectSVGReferences(project, store, sourceContentExtractor);
         const subprocess = step.subprocesses?.length
           ? step.subprocesses.find((item) => item.id === subprocessId)
             ?? step.subprocesses.find((item) => item.id === step.selectedSubprocessId)
@@ -2032,7 +2484,8 @@ export async function createLoopCanvasServer(options = {}) {
         const isFinalSubprocess = Boolean(subprocess && step.subprocesses.at(-1)?.id === subprocess.id);
         const retryContext = executionRetryContext(project, step);
         const debugFeedback = (subprocess?.debugRecords ?? []).filter((item) => item.feedback).map((item) => `调试记录 ${item.source?.path ?? "未知源码"}：${item.feedback}`).join("\n");
-        const effectiveFeedback = [String(feedback).trim(), debugFeedback, retryContext].filter(Boolean).join("\n\n");
+        const repairFeedback = repairFeedbackForStep(step);
+        const effectiveFeedback = [String(feedback).trim(), repairFeedback, debugFeedback, retryContext].filter(Boolean).join("\n\n");
         busyProjects.add(project.id);
         const controller = new AbortController();
         activeControllers.set(project.id, controller);
@@ -2088,10 +2541,21 @@ export async function createLoopCanvasServer(options = {}) {
             }
           }
           await store.mutate(() => {
-            step.status = "review";
+            step.status = executed.agentReview && executed.agentReview.verdict !== "pass" ? "ready" : "review";
             step.result = executed.result;
-            if (subprocess) { subprocess.status = "review"; subprocess.result = executed.result; subprocess.lastError = null; }
-            if (executed.result.artifact) {
+            step.agentReview = executed.agentReview ? { verdict: executed.agentReview.verdict, summary: executed.agentReview.summary, findings: executed.agentReview.findings ?? [], verifiedEvidence: executed.agentReview.verifiedEvidence ?? [], route: executed.agentReview.route ?? null, reviewedRevision: executed.agentReview.reviewedRevision, at: new Date().toISOString() } : null;
+            step.routing = executed.route ? { role: executed.route.role, model: executed.route.model, effort: executed.route.effort, available: executed.route.available, reason: executed.route.selection || executed.route.fallbackReason || "", executorLabel: routeLabel(executed.route, "执行 Agent") } : step.routing ?? null;
+            if (executed.agentReview && executed.agentReview.verdict !== "pass") {
+              step.revision += 1;
+              step.repairFindings = executed.agentReview.findings ?? [];
+              step.lastFeedback = [executed.agentReview.summary, ...(executed.agentReview.findings ?? []).map((item) => item.repairInstruction).filter(Boolean)].join("；").slice(0, 8_000);
+              project.artifact = null;
+              project.artifactStepId = null;
+              project.artifactSubprocessId = null;
+              project.executionRun = { ...(project.executionRun ?? {}), status: "ready", completedAt: null, error: null, awaitingStepIds: [] };
+            }
+            if (subprocess) { subprocess.status = executed.agentReview && executed.agentReview.verdict !== "pass" ? "ready" : "review"; subprocess.result = executed.result; subprocess.lastError = null; subprocess.lastFeedback = executed.agentReview && executed.agentReview.verdict !== "pass" ? step.lastFeedback : subprocess.lastFeedback; }
+            if (executed.result.artifact && (!executed.agentReview || executed.agentReview.verdict === "pass")) {
               project.artifact = executed.result.artifact;
               project.artifactStepId = step.id;
               project.artifactSubprocessId = subprocess?.id ?? null;
@@ -2100,7 +2564,7 @@ export async function createLoopCanvasServer(options = {}) {
             project.context.push({ id: randomUUID(), at: now, kind: "result", content: executed.result.assistantMessage, stepId: step.id, subprocessId: subprocess?.id ?? null });
             step.conversation.push({ id: randomUUID(), role: "assistant", text: executed.result.assistantMessage, subprocessId: subprocess?.id ?? null });
             project.agents.push({ id: randomUUID(), name: subprocess ? `${step.title} / ${subprocess.title}` : step.title, focus: subprocess?.purpose ?? step.purpose, status: "complete", progress: 1, notes: [executed.result.assistantMessage], stepId: step.id, subprocessId: subprocess?.id ?? null });
-            appendLog(project, "execution", subprocess ? "子进程返回结果" : "Agent 返回结果", executed.result.summary, step.id);
+            appendLog(project, executed.agentReview ? "review" : "execution", executed.agentReview?.verdict === "pass" ? "审核 Agent 通过" : executed.agentReview ? "审核 Agent 退回" : subprocess ? "子进程返回结果" : "Agent 返回结果", executed.agentReview?.summary ?? executed.result.summary, step.id);
             if (attempt > 1) appendLog(project, "execution", "自动纠错已通过", `第 ${attempt}/${MAX_EXECUTION_VALIDATION_ATTEMPTS} 次尝试通过客观校验。`, step.id);
             project.updatedAt = now;
             project.lastError = null;
@@ -2136,10 +2600,135 @@ export async function createLoopCanvasServer(options = {}) {
         }
       }
 
+      const agentReviewMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/steps\/([^/]+)\/agent-review$/);
+      if (request.method === "POST" && agentReviewMatch) {
+        const project = projectOrThrow(store, agentReviewMatch[1]);
+        const step = project.steps.find((item) => item.id === agentReviewMatch[2]);
+        if (!step?.result) throw new Error("当前步骤还没有可审核的执行结果。");
+        if (busyProjects.has(project.id)) throw new Error("这个项目已有 Agent 正在运行。");
+        busyProjects.add(project.id);
+        const controller = new AbortController();
+        activeControllers.set(project.id, controller);
+        const runtime = store.state.settings.agentRuntime === "codex" ? "codex" : "dsh";
+        try {
+          updateRuntime(project.id, { active: true, runtime, activity: `审核者正在检查：${step.title}`, stepId: step.id, stepTitle: step.title });
+          const review = await reviewRunner({ project: structuredClone(project), step: structuredClone(step), result: structuredClone(step.result) }, await harnessSettings(), controller.signal, recordAgentEvent(project.id, runtime, step.id));
+          if (!ownsProjectCall(activeControllers, project.id, controller) || controller.signal.aborted) throw new Error("审核已暂停，未应用迟到结果。");
+          if (step.reviewPending) await validateAdaptiveNodeResult(project, step, step.result);
+          await store.mutate(() => {
+            step.agentReview = { verdict: review.verdict, summary: review.summary, findings: review.findings ?? [], verifiedEvidence: review.verifiedEvidence ?? [], route: review.route ?? null, reviewedRevision: review.reviewedRevision, at: new Date().toISOString() };
+            if (review.verdict === "pass") {
+              step.status = "approved";
+              if (step.reviewPending) {
+                step.reviewPending = false;
+                step.lastError = null;
+                project.lastError = null;
+                project.pendingAction = null;
+                project.executionRun = { ...(project.executionRun ?? {}), status: "ready", error: null, completedAt: null };
+                if (isPrimaryArtifact(project, step.result.artifact)) {
+                  project.artifact = step.result.artifact;
+                  project.artifactStepId = step.id;
+                  project.artifactSubprocessId = null;
+                }
+              }
+              readyAdaptiveSteps(project);
+            }
+            else if (project.executionMode?.startsWith("adaptive")) {
+              const recordedReview = step.agentReview;
+              const feedback = [review.summary, ...(review.findings ?? []).map((item) => item.repairInstruction).filter(Boolean)].join("；").slice(0, 8_000);
+              reopenForRepair(project, step.id, feedback, null, review.findings ?? []);
+              step.agentReview = recordedReview;
+              project.finalReview = null;
+            }
+            else {
+              step.status = "ready";
+              step.revision = (step.revision ?? 1) + 1;
+              step.repairFindings = review.findings ?? [];
+              step.lastFeedback = [review.summary, ...(review.findings ?? []).map((item) => item.repairInstruction).filter(Boolean)].join("；").slice(0, 8_000);
+              project.phase = "workspace";
+              project.finalReview = null;
+              project.artifact = null;
+              project.artifactStepId = null;
+              project.artifactSubprocessId = null;
+              project.executionRun = { ...(project.executionRun ?? {}), status: "ready", completedAt: null, error: null, awaitingStepIds: [] };
+              project.pendingAction = null;
+            }
+            appendLog(project, "review", review.verdict === "pass" ? "审核 Agent 通过" : "审核 Agent 退回", review.summary, step.id);
+          });
+          updateRuntime(project.id, { active: false, activity: review.verdict === "pass" ? "步骤审核通过" : "步骤审核要求返修" });
+          releaseProjectCall(activeControllers, busyProjects, project.id, controller);
+          return json(response, 200, { state: publicState(store, busyProjects) });
+        } catch (error) {
+          if (ownsProjectCall(activeControllers, project.id, controller) && !controller.signal.aborted) {
+            await store.mutate(() => {
+              project.lastError = error.message;
+              if (step.reviewPending) step.lastError = error.message;
+              appendLog(project, "review", "步骤审核失败", error.message, step.id);
+            });
+            updateRuntime(project.id, { active: false, activity: `步骤审核失败：${error.message}` });
+          }
+          throw error;
+        } finally { releaseProjectCall(activeControllers, busyProjects, project.id, controller); }
+      }
+
+      const finalReviewMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/final-review$/);
+      if (request.method === "POST" && finalReviewMatch) {
+        const project = projectOrThrow(store, finalReviewMatch[1]);
+        if (!project.artifact) throw new Error("当前还没有主交付物，不能最终审核。");
+        if (!project.steps.length || project.steps.some((step) => step.status !== "approved" || (store.state.settings.smartRouting !== false && step.agentReview?.verdict !== "pass"))) {
+          throw new Error(store.state.settings.smartRouting !== false ? "所有步骤必须先由 Sol high 审核通过，才能进行最终审核。" : "所有步骤必须先通过当前兼容流程的验收，才能进行最终审核。");
+        }
+        if (busyProjects.has(project.id)) throw new Error("这个项目已有 Agent 正在运行。");
+        busyProjects.add(project.id);
+        const controller = new AbortController();
+        activeControllers.set(project.id, controller);
+        const runtime = store.state.settings.agentRuntime === "codex" ? "codex" : "dsh";
+        try {
+          await store.mutate(() => { project.phase = "final_review"; project.finalReview = { status: "running", verdict: null, summary: "", findings: [], at: new Date().toISOString() }; });
+          updateRuntime(project.id, { active: true, runtime, activity: "裁决者正在最终审核", percent: 100 });
+          const review = await finalReviewRunner(structuredClone(project), await harnessSettings(), controller.signal, recordAgentEvent(project.id, runtime));
+          if (!ownsProjectCall(activeControllers, project.id, controller) || controller.signal.aborted) throw new Error("最终审核已暂停，未应用迟到结果。");
+          await store.mutate(() => {
+            project.finalReview = { status: review.verdict === "pass" ? "passed" : review.verdict, verdict: review.verdict, summary: review.summary, findings: review.findings ?? [], acceptanceResults: review.acceptanceResults ?? [], repairStepIds: review.repairStepIds ?? [], route: review.route ?? null, at: new Date().toISOString() };
+            project.phase = review.verdict === "pass" ? "complete" : "workspace";
+            project.executionRun = { ...(project.executionRun ?? {}), status: review.verdict === "pass" ? "completed" : "ready", completedAt: review.verdict === "pass" ? new Date().toISOString() : null, error: null, awaitingStepIds: [] };
+            project.pendingAction = null;
+            if (review.verdict !== "pass") for (const stepId of minimalRepairStepIds(project, review.repairStepIds ?? [])) {
+              const step = project.steps.find((item) => item.id === stepId);
+              if (!step) continue;
+              if (step.status !== "approved") continue;
+              const findings = (review.findings ?? []).filter((item) => !item.criterion || (review.acceptanceResults ?? []).some((result) => result.criterion === item.criterion && !result.passed));
+              const instructions = findings.map((item) => item.repairInstruction).filter(Boolean).join("；");
+              reopenForRepair(project, stepId, [review.summary, instructions].filter(Boolean).join("；"), null, findings);
+            }
+            appendLog(project, "review", review.verdict === "pass" ? "最终审核 Agent 通过" : "最终审核要求返修", review.summary, review.repairStepIds?.[0] ?? null);
+          });
+          updateRuntime(project.id, { active: false, activity: review.verdict === "pass" ? "最终审核通过" : "最终审核要求返修", percent: review.verdict === "pass" ? 100 : null });
+          releaseProjectCall(activeControllers, busyProjects, project.id, controller);
+          return json(response, 200, { state: publicState(store, busyProjects) });
+        } catch (error) {
+          if (ownsProjectCall(activeControllers, project.id, controller) && !controller.signal.aborted) {
+            await store.mutate(() => {
+              project.phase = "workspace";
+              project.lastError = error.message;
+              project.finalReview = { ...(project.finalReview ?? {}), status: "failed", error: error.message, summary: error.message };
+              appendLog(project, "review", "最终审核失败", error.message);
+            });
+            updateRuntime(project.id, { active: false, activity: `最终审核失败：${error.message}` });
+          }
+          throw error;
+        } finally { releaseProjectCall(activeControllers, busyProjects, project.id, controller); }
+      }
+
       const approveMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/steps\/([^/]+)\/approve$/);
       if (request.method === "POST" && approveMatch) {
         const project = projectOrThrow(store, approveMatch[1]);
-        await store.mutate(() => approveStep(project, approveMatch[2]));
+        const step = project.steps.find((item) => item.id === approveMatch[2]);
+        if (store.state.settings.smartRouting !== false && enforceAgentReviewChain && step?.agentReview?.verdict !== "pass") throw new Error("智能路由下必须先由 Sol high 审核通过，不能直接验收。");
+        await store.mutate(() => {
+          approveStep(project, approveMatch[2]);
+          if (store.state.settings.smartRouting !== false && project.steps.every((item) => item.status === "approved")) project.phase = "final_review";
+        });
         return json(response, 200, { state: publicState(store, busyProjects) });
       }
 
@@ -2169,6 +2758,7 @@ export async function createLoopCanvasServer(options = {}) {
       const repairMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/steps\/([^/]+)\/return-to-repair$/);
       if (request.method === "POST" && repairMatch) {
         const project = projectOrThrow(store, repairMatch[1]);
+        if (busyProjects.has(project.id)) throw new Error("项目仍在执行，请暂停或等待结束后再返回修复。");
         const { feedback } = await readJSON(request);
         await store.mutate(() => returnVerificationToRepair(project, repairMatch[2], feedback));
         return json(response, 200, { state: publicState(store, busyProjects) });
@@ -2193,7 +2783,7 @@ export async function createLoopCanvasServer(options = {}) {
         "Content-Type": mimeTypes[path.extname(candidate)] ?? "application/octet-stream",
         "Content-Length": info.size,
         "Cache-Control": "no-cache",
-        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src 'self' http://*.localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer"
       });
@@ -2204,7 +2794,8 @@ export async function createLoopCanvasServer(options = {}) {
     }
   });
 
-  return { server, store, token, remoteManager };
+  server.once("close", () => { runtimePreviewManager.close().catch(() => null); });
+  return { server, store, token, remoteManager, runtimePreviewManager };
 }
 
 export async function startServer({ host = "127.0.0.1", port = 4317, remoteHost = "127.0.0.1", remotePort = 4321, ...options } = {}) {

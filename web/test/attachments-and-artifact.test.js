@@ -93,3 +93,12 @@ test("HTML 裸 three 模块导入必须声明精确版本", async () => {
   await assert.rejects(() => validateArtifact({ ...artifact, dependencies: ["three"] }, step), /缺少 three@精确版本/);
   await assert.rejects(() => validateArtifact({ ...artifact, dependencies: ["three@latest"] }, step), /缺少 three@精确版本/);
 });
+
+test("HTTPS 引用链接不是运行依赖，脚本、样式与图片仍需校验", async () => {
+  const artifact = { kind: "html", filename: "index.html", content: '<a href="https://www.ipcc.ch/report/ar6/syr/summary-for-policymakers/">IPCC 来源</a>' };
+  await validateArtifact(artifact, { kind: "build" });
+  for (const resource of ['<script src="https://example.com/a.js"></script>', '<link href="https://example.com/a.css" rel="stylesheet">', '<img src="https://example.com/a.png">', '<a href="https://example.com" src="https://example.com/a.png">链接</a>']) {
+    await assert.rejects(() => validateArtifact({ ...artifact, content: artifact.content + resource }, { kind: "build" }), /未授权的远程资源/);
+  }
+  await assert.rejects(() => validateArtifact({ ...artifact, content: '<a href="javascript:alert(1)">链接</a>' }, { kind: "build" }), /危险/);
+});

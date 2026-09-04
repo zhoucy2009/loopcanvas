@@ -22,7 +22,8 @@ test("Codex 优化外层提示词但不改写用户 request", () => {
   assert.deepEqual(JSON.parse(serialized), request);
   assert.match(prompt, /目标与解释边界/);
   assert.match(prompt, /不得改变原意、遗漏硬约束、增加未要求功能、扩大范围/);
-  assert.match(prompt, /只完成 request\.focus 指定的定点修正/);
+  assert.match(prompt, /request\.currentStep 与 request\.focus 指定的当前节点/);
+  assert.match(prompt, /confirmedDirections/);
   assert.match(prompt, /workspace-write/);
   assert.match(prompt, /项目规则/);
   assert.match(prompt, /项目宪法/);
@@ -61,11 +62,38 @@ test("连续项目提示词允许同一 Agent 推进全部里程碑", () => {
   assert.doesNotMatch(prompt, /只处理当前 request 和当前步骤/);
 });
 
-test("自适应首调用只在 single 分支执行，graph 分支先返回真实节点", () => {
-  const prompt = codexPrompt({ ...request, kind: "route_project" }, "/tmp/project", {}, true);
-  assert.match(prompt, /若为 single，在当前调用内直接实现、验证并交付/);
-  assert.match(prompt, /若为 graph，只返回 Harness 真正需要的执行节点与依赖/);
+test("智能规划即使只有一步也只返回 Graph 且不执行", () => {
+  const prompt = codexPrompt({ ...request, kind: "route_project", agentRole: "planner" }, "/tmp/project", {}, false);
+  assert.match(prompt, /只返回单节点 Graph/);
+  assert.match(prompt, /不实现、不验证交付、不修改文件/);
   assert.match(prompt, /不得为了展示流程人为拆步/);
+});
+
+test("角色提示词明确职责且不改写 request", () => {
+  const requestWithRole = { ...request, kind: "learning_explain_selection", agentRole: "learning" };
+  const before = structuredClone(requestWithRole);
+  const prompt = buildAgentPrompt({ runtime: "codex", workspace: "/tmp/project", request: requestWithRole });
+  assert.deepEqual(requestWithRole, before);
+  assert.match(prompt, /当前 Agent 角色（learning）/);
+  assert.match(prompt, /学习讲解者/);
+  assert.match(prompt, /不会改变原始 request/);
+});
+
+test("智能路由规划提示要求只读 Graph", () => {
+  const prompt = buildAgentPrompt({ runtime: "codex", workspace: "/tmp/project", request: { ...request, kind: "route_project", agentRole: "planner", smartRouting: true } });
+  assert.match(prompt, /只返回单节点 Graph/);
+});
+
+test("关闭智能路由后的兼容 single 使用可写交付边界而不是 planner 只读角色", () => {
+  const prompt = buildAgentPrompt({ runtime: "dsh", workspace: "/tmp/project", request: { ...request, kind: "route_project", smartRouting: false } });
+  assert.match(prompt, /兼容交付协议/);
+  assert.match(prompt, /同一次调用内完成实现与验证/);
+  assert.doesNotMatch(prompt, /当前 Agent 角色（planner）/);
+  assert.doesNotMatch(prompt, /只返回单节点 Graph/);
+});
+
+test("角色与任务类型冲突会在构造提示词前被拒绝", () => {
+  assert.throws(() => buildAgentPrompt({ runtime: "codex", workspace: "/tmp/project", request: { ...request, kind: "execute_step", agentRole: "learning" } }), /不能处理任务类型/);
 });
 
 test("稳定序列化不改变 request 值并把动态 id 放到末尾", () => {

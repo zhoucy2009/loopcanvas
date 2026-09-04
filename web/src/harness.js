@@ -8,6 +8,9 @@ import { zstdDecompressSync } from "node:zlib";
 import { ensureProjectDocuments, readProjectDocuments } from "./capabilities.js";
 import { buildAgentPrompt, serializeAgentRequest } from "./agent-prompt.js";
 import { invokeCodex, listCodexModels, resolveCodex } from "./codex.js";
+import { SMART_ROUTING_POLICY, resolveModelRoute, roleForRequest, smartRoutingEnabled } from "./smart-routing.js";
+import { artifactContext, dependencyStepIds, workflowContext } from "./workflow-context.js";
+import { normalizePreviewViewport } from "../public/preview-sizing.js";
 
 export { listCodexModels, resolveCodex };
 
@@ -420,32 +423,27 @@ function normalizeDirectionOptions(rawStep, question) {
   return inferred.length >= 2 ? inferred : [];
 }
 
-export function normalizePlanResponse(raw, requestId) {
+export function agentFailureReason(response, fallback = "Agent 返回 failure，但没有提供具体错误。") {
+  const result = response?.result ?? response?.step_result ?? {};
+  const issues = result.blockingIssues ?? result.blocking_issues;
+  const error = response?.error;
+  return [typeof error === "object" ? error?.message : error, response?.message,
+    response?.assistantMessage, response?.assistant_message, response?.reason,
+    Array.isArray(issues) ? issues.join("；") : "", result.summary, result.deviation]
+    .map((value) => String(value ?? "").trim()).find(Boolean) || fallback;
+}
+
+export function normalizePlanResponse(raw, requestId, { requiredVisualReferences = [] } = {}) {
   const response = raw.response && typeof raw.response === "object" ? raw.response : raw;
   const returnedId = response.requestID ?? response.request_id;
   if (returnedId && returnedId !== requestId) throw new Error("Agent 返回了错误的 requestID。");
   if (String(response.status ?? "success").trim().toLowerCase() === "failure") {
-    const result = response.result && typeof response.result === "object" ? response.result : {};
-    const blockingIssues = Array.isArray(result.blockingIssues ?? result.blocking_issues)
-      ? (result.blockingIssues ?? result.blocking_issues).map(String).filter(Boolean)
-      : [];
-    const reason = [
-      response.error,
-      response.message,
-      response.assistantMessage,
-      response.assistant_message,
-      response.reason,
-      blockingIssues.length ? blockingIssues.join("；") : "",
-      result.summary,
-      result.deviation
-    ].map((value) => String(value ?? "").trim()).find(Boolean);
-    throw new Error(reason || "Agent 返回 failure，但没有提供具体错误。");
+    throw new Error(agentFailureReason(response));
   }
   if (!Array.isArray(response.steps) || response.steps.length < 1 || response.steps.length > 12) throw new Error("Harness 必须返回 1–12 个真实执行节点。");
   const requestedShape = response.executionShape ?? response.execution_shape;
   const executionShape = ["single", "graph"].includes(requestedShape) ? requestedShape : response.steps.length === 1 ? "single" : "graph";
   if (executionShape === "single" && response.steps.length !== 1) throw new Error("一步直达只能包含一个执行节点。");
-  if (executionShape === "graph" && response.steps.length < 2) throw new Error("多节点执行图至少需要两个节点。");
   const steps = response.steps.map((rawStep) => {
     const kind = ["analyze", "decision", "build", "integrate", "verify", "deliver"].includes(rawStep.kind) ? rawStep.kind : "build";
     const directionQuestion = String(rawStep.directionQuestion ?? rawStep.direction_question ?? "").trim();
@@ -502,7 +500,9 @@ export function normalizePlanResponse(raw, requestId) {
     executionShape,
     primaryArtifact,
     steps,
-    execution: executionShape === "single" ? normalizeExecutionResponse(response, requestId, "", { stepKind: "deliver" }).result : null
+    execution: executionShape === "single"
+      ? normalizeExecutionResponse(response, requestId, "", { stepKind: "deliver", requiredVisualReferences }).result
+      : null
   };
 }
 
@@ -540,8 +540,13 @@ export function normalizeExecutionResponse(raw, requestId, expectedOptionId = ""
       directionOptions
     };
   }
-  if (status === "failure") throw new Error(response.error || "Agent 返回 failure，但没有提供具体错误。");
   const result = response.result ?? response.step_result;
+  // A completed verification with negative findings is a real result, not a
+  // transport error. Keep it so the UI can return it to the producing node.
+  const negativeVerification = stepKind === "verify" && (result?.verificationPassed ?? result?.verification_passed) === false
+    && Array.isArray(result?.evidence) && result.evidence.some((item) => String(item).trim())
+    && (result?.blockingIssues ?? result?.blocking_issues)?.some?.((item) => String(item).trim());
+  if (status === "failure" && !negativeVerification) throw new Error(agentFailureReason(response));
   if (!result || typeof result !== "object") throw new Error("Agent 没有返回步骤结果。");
   const selectedOptionId = String(result.selectedOptionId ?? result.selected_option_id ?? "").trim();
   if (expectedOptionId && !selectedOptionId) {
@@ -558,6 +563,8 @@ export function normalizeExecutionResponse(raw, requestId, expectedOptionId = ""
     projectRoot: result.artifact.projectRoot ?? result.artifact.project_root ?? null,
     files: Array.isArray(result.artifact.files) ? result.artifact.files.map(String) : [],
     entrypoint: result.artifact.entrypoint ? String(result.artifact.entrypoint) : null,
+    ...(normalizePreviewViewport(result.artifact.previewViewport ?? result.artifact.preview_viewport)
+      ? { previewViewport: normalizePreviewViewport(result.artifact.previewViewport ?? result.artifact.preview_viewport) } : {}),
     dependencies: Array.isArray(result.artifact.dependencies) ? result.artifact.dependencies.map(String) : [],
     runCommands: Array.isArray(result.artifact.runCommands ?? result.artifact.run_commands)
       ? (result.artifact.runCommands ?? result.artifact.run_commands).map(String) : [],
@@ -657,7 +664,7 @@ export const EXPLORATION_ART_MODEL_POLICY = [
   "尊重著作权和署名，不建议逐像素复制仍受保护的作品；将参考转化为可组合的视觉原则和差异化方向。"
 ].join(" ");
 
-const VISUAL_REFERENCE_MODEL_POLICY = "visualReferences 是服务端生成的可审计视觉转译。mode=metadata-only 且 pixelAccess=false 时，你没有看过图片像素；只能使用 agentText 中的标题、来源说明和结构化元数据。不得补写未给出的颜色、构图、主体或材质。若使用了参考，必须在 result.visualReferencesUsed 中逐一原样回传 id，并用 appliedAs 说明如何应用、用 evidence 指向可公开检查的产物证据；缺少回执会使结果被拒绝。";
+const VISUAL_REFERENCE_MODEL_POLICY = "visualReferences 是服务端生成的可审计视觉参考。mode=svg-source 时可以依据 agentText 内的 SVG 源码读取矢量结构、路径、配色与比例，但这仍不是像素视觉输入；mode=metadata-only 且 pixelAccess=false 时只能使用 agentText 中的标题、来源说明和结构化元数据，不得补写未给出的颜色、构图、主体或材质。若使用了参考，必须在 result.visualReferencesUsed 中逐一原样回传 id，并用 appliedAs 说明如何应用、用 evidence 指向可公开检查的产物证据；缺少回执会使结果被拒绝。";
 
 function visualReferenceUsageExample(visualReferences = []) {
   if (!visualReferences.length) return "";
@@ -758,13 +765,14 @@ function normalizedSource(source = {}) {
 }
 
 export function visualReferencesForAgent(project = {}) {
-  return (Array.isArray(project.executionReferences) ? project.executionReferences : []).filter((reference) => reference?.visual?.mode === "metadata-only" && reference.visual.pixelAccess === false && reference.visual.agentText).map((reference) => ({
+  return (Array.isArray(project.executionReferences) ? project.executionReferences : []).filter((reference) => ["metadata-only", "svg-source"].includes(reference?.visual?.mode) && reference.visual.pixelAccess === false && reference.visual.agentText).map((reference) => ({
     id: String(reference.id),
     title: String(reference.title ?? "未命名视觉参考"),
     sourceURL: String(reference.url ?? ""),
     displayOnlyPreviewURL: String(reference.previewURL ?? ""),
-    mode: "metadata-only",
+    mode: reference.visual.mode,
     pixelAccess: false,
+    sourceAccess: reference.visual.mode === "svg-source",
     agentText: String(reference.visual.agentText)
   }));
 }
@@ -811,6 +819,13 @@ async function invokeDsh(request, settings, options = {}, signal, onEvent) {
   const dshPath = await resolveDsh({ explicitPath: settings.dshPath });
   if (!dshPath) throw new Error("未找到 dsh。请先运行 npx @deepseek-ai/dsh web。 ");
   const workspace = path.resolve(options.workspace ?? settings.workspace);
+  const route = resolveModelRoute(request, settings);
+  if (smartRoutingEnabled(settings, request) && route.available === false) {
+    throw new Error(`${route.fallbackReason} 请在设置中切换到 Codex App Server，或关闭智能路由后使用手动模型。`);
+  }
+  const readonlyRoute = ["reviewer", "judge", "learning", "search", "tracer"].includes(route.role)
+    || (route.role === "planner" && smartRoutingEnabled(settings, request));
+  onEvent?.({ type: "route", route });
   const dshHome = process.env.DSH_HOME || path.join(os.homedir(), ".dsh");
   const sessionsBefore = await dshSessionSnapshot(dshHome);
   await mkdir(workspace, { recursive: true });
@@ -824,8 +839,8 @@ async function invokeDsh(request, settings, options = {}, signal, onEvent) {
     await writeFile(settingsPath, [
       "agent-default-model:",
       "  provider: deepseek-official",
-      `  model: ${settings.model}`,
-      `  reasoningEffort: ${settings.reasoningEffort}`,
+      `  model: ${route.model || settings.model}`,
+      `  reasoningEffort: ${route.effort || settings.reasoningEffort}`,
       "locale:",
       "  preference: zh",
       ""
@@ -847,7 +862,9 @@ async function invokeDsh(request, settings, options = {}, signal, onEvent) {
       requestPath,
       agents: options.agents,
       constitution: options.constitution,
-      accessBoundary: "所有文件创建、编辑和命令执行必须位于工作目录内（允许其子目录）；允许按任务需要使用当前 headless 配置中已启用的工具访问公开网络；不得假设存在未启用的网络工具或工作目录之外的写入权限。"
+      accessBoundary: readonlyRoute
+        ? "本次智能路由规划为 read-only；不得创建、编辑或删除项目文件，也不得运行改变项目状态的命令。允许读取工作目录和按任务需要访问公开网络。"
+        : "所有文件创建、编辑和命令执行必须位于工作目录内（允许其子目录）；允许按任务需要使用当前 headless 配置中已启用的工具访问公开网络；不得假设存在未启用的网络工具或工作目录之外的写入权限。"
     });
     onEvent?.({ type: "activity", activity: "调用 DeepSeek Harness" });
     let telemetryPolling = false;
@@ -896,8 +913,8 @@ async function invoke(request, settings, options = {}, signal, onEvent) {
   return invokeDsh(request, settings, options, signal, onEvent);
 }
 
-async function harnessDocuments(project, workspace) {
-  await ensureProjectDocuments({ workspace, project });
+async function harnessDocuments(project, workspace, { readonly = false } = {}) {
+  if (!readonly) await ensureProjectDocuments({ workspace, project });
   const documents = await readProjectDocuments(workspace);
   return { agents: documents.agents, constitution: documents.constitution };
 }
@@ -911,7 +928,11 @@ async function invokeDisposable(request, settings, signal) {
   }
 }
 
-const MODEL_POLICY = "先判断任务能否由一个 Agent 在一次调用内准确完成。简单、明确、低风险且无需目标方向决策的任务选择 single，并在当前调用中直接实现、验证和交付；不得为了展示流程人为拆步。只有任务确实存在多个可独立追踪的执行节点、依赖、并行机会或必须询问用户的目标方向时才选择 graph。graph 节点必须对应 Harness 真正会执行的工作，不生成备选方案或固定模板子进程；先返回节点图，本次不得修改项目文件。节点应声明 dependencies、parallelSafe、writeScope，以及是否 requiresUserDirection。需要用户决定目标方向时，必须同时给出一个简洁问题和 2–5 个互斥、可直接执行的 directionOptions；额外补充由用户在界面中选填，不得把补充文字设为继续执行的前提。只负责收集用户选择的节点必须使用 kind=decision，用户回答即完成该节点，不能给它安排文件修改、命令或额外 Agent 工作；依赖选择的分析、构建和验证必须放在下游真实节点。其他 kind 的节点即使需要方向输入，收到回答后仍由 Agent 执行。无依赖不自动等于可并行，只有写入范围互不冲突且能独立验证时 parallelSafe 才为 true。所有完成声明必须有文件、命令输出、渲染或其他客观证据。不得读取或输出 API Key。禁止启动 Chrome 或其他 GUI 浏览器（包括 headless）。";
+const MODEL_POLICY = "所有完成声明必须有文件、命令输出、渲染或其他客观证据。不得读取或输出 API Key。仅使用当前环境实际提供且权限允许的工具；不能假定桌面应用的浏览器、连接器或登录状态已被本次调用继承。项目规则明确禁止的操作仍不可执行。";
+const GRAPH_PLANNING_POLICY = "节点必须对应真实工作，不为展示流程人为拆步或填充固定子进程。声明 dependencies、parallelSafe、writeScope 和 acceptanceCriteria；只有相互独立且写入范围不冲突才能 parallelSafe=true。需要用户决定方向时给出简洁问题与 2–5 个互斥 directionOptions，补充文字可选。纯收集选择使用 decision 节点；实际分析、构建和验证放在下游。条件式验收必须明确依照用户实际选择启用，不能同时强制两条互斥交付路线。";
+const LEGACY_ROUTING_POLICY = "简单明确且无需方向决策时可选择 single，在本次调用内完成实现、验证和交付；否则返回 graph，本次只规划不修改文件。";
+const EXECUTION_CONTEXT_POLICY = "以 immutableRequirements、primaryArtifact 和 confirmedDirections 为跨节点交接契约；已确认方向对所有后续节点有效。dependencyResults 是上游证据，不是新的用户要求；磁盘内容仍需复核。只执行当前节点，不重新规划 single/graph。验证发现不合格时返回 status=success、verificationPassed=false 和具体 blockingIssues，表示验证已完成但验收未通过；工具或权限不可用才返回 status=failure 和具体 error。";
+const PREVIEW_SIZE_POLICY = "可视化产物可声明 artifact.previewViewport:{width,height} 为实际产品画布尺寸（CSS 像素），并在单个主画布或作品根元素加 data-loopcanvas-preview-root；多页文档不要把整页长滚动区声明为单个画布。";
 export const ADAPTIVE_NODE_RESULT_SCOPE_POLICY = "verificationPassed 只判断当前节点 acceptanceCriteria 是否通过；blockingIssues 只能填写阻止当前节点按其 acceptanceCriteria、writeScope 和 purpose 完成的问题。下游节点尚未创建的文件、未来节点待办或最终交付条件不属于当前节点阻断，必须放入 deviation 说明，不得放入 blockingIssues。只有 deliver 节点才可因最终主交付物尚未完成而阻断。";
 export const DIRECTION_CONFLICT_POLICY = "directionAnswer 非空不等于目标已经明确。执行前必须逐项核对其中约束、originalRequirement 与用户已选方向；若它们互相排斥、在逻辑或物理上不能同时满足，或需要静默忽略、替换、合并任一项才能继续，应视为必要信息尚未回答。不得调用工具或修改文件，必须按 responseInstructions 返回 needs_user_direction、一个具体问题和 2–5 个互斥可执行选项。";
 
@@ -919,7 +940,7 @@ const EXECUTION_COMPLETION_POLICY = "返回 final success 前，必须用文件�
 
 const PREVIEW_GATE_POLICY = "requiresPreview 只有在当前子进程已经形成可由用户直接观察和验收的产品里程碑时才能为 true，例如苹果模型已经可见、场景已经构建成形、可交互界面达到阶段成品或最终成果已经生成。仅新增几行代码、修改配置、准备数据、生成日志/测试结果/文字报告或其他尚不可直接验收的中间文件时必须为 false；没有 artifact 时也必须为 false。最终 deliver 步骤有 artifact 时必须为 true。previewReason 用一句话说明用户现在能检查什么。";
 
-const PREVIEW_TRACE_POLICY = "创建或修改可预览 HTML 时，执行阶段必须把每个有独立视觉边界或独立修改意义的界面组织成可选择组。DOM/SVG 组使用稳定且语义化、能在原始源码中直接搜索到的 data-loopcanvas-group；需要更细源码身份时同时使用 data-loopcanvas-trace。不要给纯布局包装层或每个文字节点重复分组。Three.js 在逻辑 Group/Object3D 的 userData.loopcanvas 中写入唯一 traceId、简短 label 和 group:true，并在场景初始化后调用 window.__loopcanvasTrace?.registerThree({THREE,scene,camera,renderer})。Canvas 2D、自定义 WebGL/WebGPU 或其他引擎必须调用 window.__loopcanvasTrace?.registerPicker({element,pick})，按命中结果返回 {kind,groupId,traceId,label,bounds?}；bounds 是相对画布的组选中框。无法为第三方或静态资产建立精确追溯时必须保持真实，不得伪造映射。";
+export const PREVIEW_TRACE_POLICY = "创建或修改可预览 HTML 时，执行阶段必须把每个有独立视觉边界或独立修改意义的界面组织成可选择组。DOM/SVG 组使用稳定且语义化、能在原始源码中直接搜索到的 data-loopcanvas-group；需要更细源码身份时同时使用 data-loopcanvas-trace。不要给纯布局包装层或每个文字节点重复分组。纯 DOM/SVG 元素只有在点击、拖放等作用范围完全由浏览器自身边界决定并会随 CSS 几何自动移动时，才可直接使用标签二维编辑；只要还存在独立代码维护的碰撞、命中、得分或触发坐标，就必须和 Canvas 对象一样注册几何编辑器，不得只改标签 translate。Three.js 在逻辑 Group/Object3D 的 userData.loopcanvas 中写入唯一 traceId、简短 label 和 group:true，并在场景初始化后调用 window.__loopcanvasTrace?.registerThree({THREE,scene,camera,renderer})。Canvas 2D、自定义 WebGL/WebGPU 或其他引擎必须调用 window.__loopcanvasTrace?.registerPicker({element,pick})，按命中结果返回 {kind,groupId,traceId,label,bounds?}；bounds 是相对画布的组选中框。任何存在独立逻辑作用范围且需要支持 Shift 二维编辑的物体，都必须调用 window.__loopcanvasTrace?.registerGeometryEditor({element,pick,inspectInteractionRegions,preview,commit,cancel})：pick 返回稳定 traceId/groupId 与 bounds；inspectInteractionRegions 必须在移动前审查该物体关联的碰撞区、命中区、得分区、触发区、可投放区或其他可作用范围，有则返回 [{id,label,bounds}]、没有则明确返回 []，其中 bounds 均相对 element；缺少审查能力时编辑器会阻止移动。preview 和 commit 会收到按物体位移及缩放同步计算后的 interactionRegions；实时预览必须同时更新物体与这些范围，commit 必须在同一次 {path,oldText,newText,interactionRegionIds} 唯一源码替换中写回视觉坐标和所有关联作用范围，interactionRegionIds 必须逐项确认已同步的范围 id，不能只移动画面。取消时必须恢复两者。不得让 Agent 在确认后凭视觉猜坐标。无法建立精确追溯、无法完整同步作用范围或无法唯一替换时必须保持真实并拒绝提交，不得伪造映射。";
 
 export function compactSharedContext(items = [], userGoal = "") {
   const goal = String(userGoal ?? "").trim();
@@ -937,27 +958,70 @@ export function compactSharedContext(items = [], userGoal = "") {
   return lines.join("\n");
 }
 
+const ROLE_CONTEXT_KINDS = Object.freeze({
+  planner: new Set(["user", "requirement", "plan", "route", "reference", "decision", "correction", "result"]),
+  executor: new Set(["user", "requirement", "plan", "route", "reference", "decision", "correction", "result"]),
+  reviewer: new Set(["user", "requirement", "plan", "route", "reference", "decision", "correction", "result"]),
+  judge: new Set(["user", "requirement", "plan", "route", "reference", "decision", "correction", "result"]),
+  // Learning and search receive their explicit source/thread history instead of
+  // the workflow context; this prevents execution results leaking into them.
+  learning: new Set(),
+  search: new Set(),
+  tracer: new Set(["user", "requirement", "reference", "decision", "correction"])
+});
+
+/**
+ * Keep context selection deterministic and role-local. The returned items are
+ * shallow references and are never mutated by this helper.
+ */
+export function scopeContextForRole(items = [], role = "planner", { stepId = null, dependencyIds = [] } = {}) {
+  const normalizedRole = roleForRequest({ agentRole: role }) || "planner";
+  const allowedKinds = ROLE_CONTEXT_KINDS[normalizedRole] ?? ROLE_CONTEXT_KINDS.planner;
+  if (!allowedKinds.size) return [];
+  const targetSteps = new Set([stepId, ...(Array.isArray(dependencyIds) ? dependencyIds : [])].filter(Boolean).map(String));
+  const scopedStepRole = ["executor", "reviewer", "judge", "tracer"].includes(normalizedRole);
+  return (Array.isArray(items) ? items : []).filter((item) => {
+    if (!allowedKinds.has(String(item?.kind ?? "context"))) return false;
+    if (!scopedStepRole || item?.stepId == null) return true;
+    return targetSteps.has(String(item.stepId));
+  });
+}
+
 export async function planWithHarness(project, settings, signal, onEvent) {
   const requestId = randomUUID();
+  const visualReferences = visualReferencesForAgent(project);
   const request = {
     id: requestId,
     kind: "route_project",
+    ...(settings.smartRouting !== false ? { agentRole: "planner" } : {}),
+    smartRouting: settings.smartRouting !== false,
+    routePhase: "planning",
     userGoal: project.goal,
-    focus: "判断任务应一步直达还是使用真实执行节点；一步直达时在本次调用内直接完成、验证并交付",
-    modelPolicy: `${MODEL_POLICY} ${EXECUTION_COMPLETION_POLICY} ${PREVIEW_GATE_POLICY} ${PREVIEW_TRACE_POLICY}`,
+    focus: settings.smartRouting !== false
+      ? "只生成真实执行 Graph 与验收标准；可一步完成时返回单节点 Graph，本次不得实现或修改文件"
+      : "使用兼容协议选择 single 或 Graph；若返回 single，必须在本次调用内实现、验证并交付；若返回 Graph，本次只规划",
+    modelPolicy: `${MODEL_POLICY} ${GRAPH_PLANNING_POLICY} ${settings.smartRouting !== false ? SMART_ROUTING_POLICY : `${LEGACY_ROUTING_POLICY} ${EXECUTION_COMPLETION_POLICY} ${PREVIEW_GATE_POLICY} ${PREVIEW_SIZE_POLICY}`}${visualReferences.length ? ` ${VISUAL_REFERENCE_MODEL_POLICY}` : ""}`,
     cautionLevel: settings.cautionLevel ?? "medium",
-    sharedContext: compactSharedContext(project.context, project.goal),
+    sharedContext: compactSharedContext(scopeContextForRole(project.context, "planner"), project.goal),
     attachments: project.attachments ?? [],
+    visualReferences,
     requirementDirectives: project.directives ?? [],
     existingSteps: [],
-    responseInstructions: `只返回一个 JSON。共同字段：{\"requestID\":\"${requestId}\",\"status\":\"success\",\"executionShape\":\"single|graph\",\"assistantMessage\":\"判断依据和公开摘要\",\"primaryArtifact\":{\"title\":\"...\",\"kind\":\"html|markdown|text\",\"filename\":\"项目内相对路径\",\"entrypoint\":\"...\",\"acceptanceCriteria\":[\"客观条件\"]},\"steps\":[{\"id\":\"UUID\",\"title\":\"真实执行节点\",\"purpose\":\"...\",\"kind\":\"analyze|decision|build|integrate|verify|deliver\",\"riskLevel\":\"L0|L1|L2|L3\",\"cautionLevel\":null或\"low|medium|high\",\"dependencies\":[\"前置节点UUID\"],\"parallelSafe\":false,\"writeScope\":[\"预计写入的相对路径\"],\"requiresUserDirection\":false,\"directionQuestion\":\"仅在需要方向时填写简洁问题\",\"directionOptions\":[{\"id\":\"稳定短ID\",\"label\":\"可直接选择的名称\",\"description\":\"这个方向的范围或取舍\"}],\"acceptanceCriteria\":[\"节点完成条件\"],\"appliedDirectiveIDs\":[\"约束UUID\"]}]}。requiresUserDirection=true 时 directionOptions 必须有 2–5 个互斥选项；用户可另写补充但补充不是必填。若 executionShape=single：steps 只能有一个节点，立即在本次调用内完成实现和验证，并额外返回 result：{\"summary\":\"...\",\"actualChanges\":[\"...\"],\"evidence\":[\"...\"],\"deviation\":\"...\",\"rollback\":\"...\",\"verificationPassed\":true,\"blockingIssues\":[],\"artifact\":{\"title\":\"...\",\"kind\":\"html|markdown|text\",\"filename\":\"与 primaryArtifact 一致\",\"projectRoot\":\"绝对工作目录\",\"files\":[\"...\"],\"entrypoint\":\"...\",\"dependencies\":[],\"runCommands\":[],\"testCommands\":[],\"testResults\":[]}}。若 executionShape=graph：返回 2–12 个真实节点和依赖，本次不得修改任何项目文件，也不要返回普通方案 options/subprocesses；方向节点的 directionOptions 是人类门控输入。若无法完成，必须返回 {\"requestID\":\"${requestId}\",\"status\":\"failure\",\"error\":\"具体、可恢复的失败原因\"}，error 不得为空。`
+    routePolicy: settings.smartRouting !== false ? SMART_ROUTING_POLICY : "",
+    responseInstructions: `只返回一个 JSON。共同字段：{\"requestID\":\"${requestId}\",\"status\":\"success\",\"executionShape\":\"single|graph\",\"assistantMessage\":\"判断依据和公开摘要\",\"primaryArtifact\":{\"title\":\"...\",\"kind\":\"html|markdown|text\",\"filename\":\"项目内相对路径\",\"entrypoint\":\"...\",\"acceptanceCriteria\":[\"客观条件\"]},\"steps\":[{\"id\":\"UUID\",\"title\":\"真实执行节点\",\"purpose\":\"...\",\"kind\":\"analyze|decision|build|integrate|verify|deliver\",\"riskLevel\":\"L0|L1|L2|L3\",\"cautionLevel\":null或\"low|medium|high\",\"dependencies\":[\"前置节点UUID\"],\"parallelSafe\":false,\"writeScope\":[\"预计写入的相对路径\"],\"requiresUserDirection\":false,\"directionQuestion\":\"仅在需要方向时填写简洁问题\",\"directionOptions\":[{\"id\":\"稳定短ID\",\"label\":\"可直接选择的名称\",\"description\":\"这个方向的范围或取舍\"}],\"acceptanceCriteria\":[\"节点完成条件\"],\"appliedDirectiveIDs\":[\"约束UUID\"]}]}。requiresUserDirection=true 时 directionOptions 必须有 2–5 个互斥选项；用户可另写补充但补充不是必填。若 executionShape=single：steps 只能有一个节点，立即在本次调用内完成实现和验证，并额外返回 result：{\"summary\":\"...\",\"actualChanges\":[\"...\"],\"evidence\":[\"...\"],\"deviation\":\"...\",\"rollback\":\"...\",\"verificationPassed\":true,\"blockingIssues\":[]${visualReferenceUsageExample(visualReferences)},\"artifact\":{\"title\":\"...\",\"kind\":\"html|markdown|text\",\"filename\":\"与 primaryArtifact 一致\",\"projectRoot\":\"绝对工作目录\",\"files\":[\"...\"],\"entrypoint\":\"...\",\"dependencies\":[],\"runCommands\":[],\"testCommands\":[],\"testResults\":[]}}。若 executionShape=graph：返回 2–12 个真实节点和依赖，本次不得修改任何项目文件，也不要返回普通方案 options/subprocesses；方向节点的 directionOptions 是人类门控输入。${visualReferences.length ? " 若选择一步直达，result.visualReferencesUsed 必须逐一覆盖 request.visualReferences；若选择执行图，后续实际执行节点仍会收到这些参考。" : ""}若无法完成，必须返回 {\"requestID\":\"${requestId}\",\"status\":\"failure\",\"error\":\"具体、可恢复的失败原因\"}，error 不得为空。`
   };
   const workspace = resolveProjectWorkspace(project, settings);
-  const documents = await harnessDocuments(project, workspace);
+  if (settings.smartRouting !== false) {
+    request.responseInstructions = `只返回 JSON：{"requestID":"${requestId}","status":"success","executionShape":"graph","assistantMessage":"规划依据和公开摘要","primaryArtifact":{"title":"...","kind":"html|markdown|text","filename":"项目内相对路径","entrypoint":"...","acceptanceCriteria":["客观条件"]},"steps":[{"id":"UUID","title":"真实执行节点","purpose":"...","kind":"analyze|decision|build|integrate|verify|deliver","riskLevel":"L0|L1|L2|L3","cautionLevel":null或"low|medium|high","dependencies":["前置节点UUID"],"parallelSafe":false,"writeScope":["预计写入的相对路径"],"requiresUserDirection":false,"directionQuestion":"...","directionOptions":[],"acceptanceCriteria":["节点完成条件"],"appliedDirectiveIDs":["约束UUID"]}]}。steps 必须有 1–12 个；即使可一步完成也返回单节点 graph。本次不得修改文件，不得返回 result 或 single。失败时返回 status=failure 和具体 error。`;
+  }
+  const documents = await harnessDocuments(project, workspace, { readonly: settings.smartRouting !== false });
   const rawOutput = await invoke(request, settings, { workspace, ...documents }, signal, onEvent);
   let planned;
   try {
-    planned = normalizePlanResponse(extractJSONObject(rawOutput), requestId);
+    planned = normalizePlanResponse(extractJSONObject(rawOutput), requestId, { requiredVisualReferences: visualReferences });
+    if (smartRoutingEnabled(settings, request) && planned.executionShape !== "graph") {
+      throw new Error("智能路由规划者只能返回 Graph；single 直达会绕过独立执行、步骤审核和最终裁决。 ");
+    }
     if (planned.executionShape === "single" && planned.execution?.artifact) {
       validateArtifactBoundary(planned.execution.artifact, workspace);
       if (planned.execution.artifact.filename !== planned.primaryArtifact.filename || planned.execution.artifact.kind !== planned.primaryArtifact.kind) {
@@ -973,6 +1037,96 @@ export async function planWithHarness(project, settings, signal, onEvent) {
   return { result: planned, request, rawOutput };
 }
 
+export function normalizeAgentReviewResponse(raw, requestId, { final = false, stepIds = [], acceptanceCriteria = [] } = {}) {
+  const response = raw?.response && typeof raw.response === "object" ? raw.response : raw;
+  const returnedId = response?.requestID ?? response?.request_id;
+  if (returnedId && returnedId !== requestId) throw new Error("审核 Agent 返回了错误的 requestID。");
+  if (String(response?.status ?? "success").toLowerCase() === "failure") throw new Error(agentFailureReason(response, "审核 Agent 返回失败。"));
+  const verdict = String(response?.verdict ?? "").toLowerCase();
+  if (!["pass", "repair", "blocked"].includes(verdict)) throw new Error("审核 Agent 返回了无效 verdict。");
+  const summary = String(response.summary ?? "").trim();
+  if (!summary) throw new Error("审核 Agent 没有返回审核摘要。");
+  const findings = (Array.isArray(response.findings) ? response.findings : []).slice(0, 20).map((item) => ({
+    severity: ["blocking", "major", "minor"].includes(item?.severity) ? item.severity : "major",
+    criterion: String(item?.criterion ?? "").trim(),
+    evidence: String(item?.evidence ?? "").trim(),
+    repairInstruction: String(item?.repairInstruction ?? item?.repair_instruction ?? "").trim()
+  })).filter((item) => item.criterion || item.evidence || item.repairInstruction);
+  const verifiedEvidence = (Array.isArray(response.verifiedEvidence ?? response.verified_evidence) ? (response.verifiedEvidence ?? response.verified_evidence) : []).map(String).filter(Boolean).slice(0, 30);
+  const acceptanceResults = (Array.isArray(response.acceptanceResults ?? response.acceptance_results) ? (response.acceptanceResults ?? response.acceptance_results) : []).slice(0, 30).map((item) => ({
+    criterion: String(item?.criterion ?? "").trim(),
+    passed: item?.passed === true,
+    evidence: String(item?.evidence ?? "").trim()
+  })).filter((item) => item.criterion);
+  const allowedStepIds = new Set(stepIds.map(String));
+  const repairStepIds = (Array.isArray(response.repairStepIds ?? response.repair_step_ids) ? (response.repairStepIds ?? response.repair_step_ids) : []).map(String).filter((id) => allowedStepIds.has(id));
+  if (verdict === "pass" && !verifiedEvidence.length && !acceptanceResults.some((item) => item.passed && item.evidence)) throw new Error("审核通过但没有可复查证据。");
+  if (final && verdict === "pass" && acceptanceResults.some((item) => !item.passed)) throw new Error("最终裁决存在未通过验收项却返回 pass。");
+  if (final && acceptanceCriteria.length) {
+    const expected = acceptanceCriteria.map((item) => String(item).trim());
+    const returned = acceptanceResults.map((item) => item.criterion);
+    if (returned.length !== expected.length || new Set(returned).size !== returned.length || expected.some((criterion) => !returned.includes(criterion))) {
+      throw new Error("最终裁决的 acceptanceResults 必须与主交付物验收条件一一匹配，不能遗漏、重复或新增条件。");
+    }
+    if (verdict === "pass" && acceptanceResults.some((item) => !item.passed || !item.evidence)) {
+      throw new Error("最终裁决通过时，每条验收条件都必须通过并包含独立复查证据。");
+    }
+  }
+  if (final && verdict === "repair" && !repairStepIds.length) throw new Error("最终裁决要求返修时必须指向已有步骤。");
+  return { verdict, summary, findings, verifiedEvidence, acceptanceResults, repairStepIds };
+}
+
+export async function reviewStepWithHarness({ project, step, result }, settings, signal, onEvent) {
+  const requestId = randomUUID();
+  const request = {
+    id: requestId,
+    kind: "review_step",
+    agentRole: "reviewer",
+    ...workflowContext(project, step),
+    sharedContext: compactSharedContext(scopeContextForRole(project.context, "reviewer", { stepId: step.id, dependencyIds: [...dependencyStepIds(project, step)] }), project.goal),
+    userGoal: project.goal,
+    focus: `独立审核节点“${step.title}”第 ${step.revision ?? 1} 版结果；只读复查，不修改文件。`,
+    immutableRequirements: { goal: project.goal, directives: project.directives ?? [] },
+    currentStep: { id: step.id, title: step.title, purpose: step.purpose, kind: step.kind, revision: step.revision, acceptanceCriteria: step.acceptanceCriteria ?? [], writeScope: step.writeScope ?? [] },
+    dependencyReviews: (step.dependencies ?? []).map((id) => {
+      const dependency = project.steps.find((item) => item.id === id);
+      return dependency ? { id, title: dependency.title, verdict: dependency.agentReview?.verdict ?? "legacy-approved", summary: dependency.agentReview?.summary ?? dependency.result?.summary ?? "" } : { id, missing: true };
+    }),
+    executionClaims: { summary: result?.summary ?? "", actualChanges: result?.actualChanges ?? [], evidence: result?.evidence ?? [], verificationPassed: result?.verificationPassed ?? null, blockingIssues: result?.blockingIssues ?? [], artifact: artifactContext(result?.artifact) },
+    responseInstructions: `只返回 JSON：{"requestID":"${requestId}","status":"success","verdict":"pass|repair|blocked","summary":"独立审核摘要","findings":[{"severity":"blocking|major|minor","criterion":"对应验收条件","evidence":"从磁盘或结果证据复查到的事实","repairInstruction":"需要执行者怎样修复"}],"verifiedEvidence":["独立复查过的证据"]}。pass 必须包含 verifiedEvidence；不能只复述执行者声明。`
+  };
+  const workspace = resolveProjectWorkspace(project, settings);
+  const documents = await harnessDocuments(project, workspace, { readonly: true });
+  const rawOutput = await invoke(request, settings, { workspace, ...documents }, signal, onEvent);
+  const review = normalizeAgentReviewResponse(extractJSONObject(rawOutput), requestId);
+  return { ...review, request, rawOutput, route: resolveModelRoute(request, settings), reviewedStepId: step.id, reviewedRevision: step.revision ?? 1 };
+}
+
+export async function finalReviewWithHarness(project, settings, signal, onEvent) {
+  const requestId = randomUUID();
+  const acceptanceCriteria = project.primaryArtifact?.acceptanceCriteria ?? [];
+  const request = {
+    id: requestId,
+    kind: "review_final",
+    agentRole: "judge",
+    ...workflowContext(project),
+    sharedContext: compactSharedContext(scopeContextForRole(project.context, "judge", { dependencyIds: project.steps.map((item) => item.id) }), project.goal),
+    routePhase: "final",
+    userGoal: project.goal,
+    focus: "对最终主交付物做独立只读裁决；不得修复文件或替任何步骤补做工作。",
+    primaryArtifact: project.primaryArtifact,
+    finalArtifact: project.artifact,
+    acceptanceCriteria,
+    stepReviews: project.steps.map((step) => ({ id: step.id, title: step.title, revision: step.revision, verdict: step.agentReview?.verdict ?? "legacy-approved", summary: step.agentReview?.summary ?? "", verifiedEvidence: step.agentReview?.verifiedEvidence ?? [] })),
+    responseInstructions: `只返回 JSON：{"requestID":"${requestId}","status":"success","verdict":"pass|repair|blocked","summary":"最终裁决摘要","acceptanceResults":[${acceptanceCriteria.map((criterion) => `{"criterion":${JSON.stringify(criterion)},"passed":true,"evidence":"独立复查证据"}`).join(",")}],"findings":[{"severity":"blocking|major|minor","criterion":"...","evidence":"...","repairInstruction":"..."}],"verifiedEvidence":["最终复查证据"],"repairStepIds":["需要返修的已有步骤ID"]}。pass 必须逐项覆盖 acceptanceCriteria 且有证据；repair 必须给出已有步骤 ID。`
+  };
+  const workspace = resolveProjectWorkspace(project, settings);
+  const documents = await harnessDocuments(project, workspace, { readonly: true });
+  const rawOutput = await invoke(request, settings, { workspace, ...documents }, signal, onEvent);
+  const review = normalizeAgentReviewResponse(extractJSONObject(rawOutput), requestId, { final: true, stepIds: project.steps.map((step) => step.id), acceptanceCriteria });
+  return { ...review, request, rawOutput, route: resolveModelRoute(request, settings), reviewedAt: new Date().toISOString() };
+}
+
 export async function executeWithHarness(project, step, settings, feedback = "", signal, onEvent) {
   const requestId = randomUUID();
   const subprocess = step.activeSubprocess
@@ -981,8 +1135,9 @@ export async function executeWithHarness(project, step, settings, feedback = "",
   const optionOwner = subprocess ?? step;
   const selectedOption = (optionOwner.options ?? []).find((option) => option.id === optionOwner.selectedOptionId) ?? null;
   const visualReferences = visualReferencesForAgent(project);
-  const relevantContext = project.context.filter((item) => item.stepId === step.id || (item.stepId == null && ["requirement", "plan", "reference"].includes(item.kind)));
-  const relevantStepIds = new Set([step.id, ...(step.dependencies ?? [])]);
+  const dependencyIds = [...dependencyStepIds(project, step)];
+  const relevantContext = scopeContextForRole(project.context, "executor", { stepId: step.id, dependencyIds });
+  const relevantStepIds = new Set([step.id, ...dependencyIds]);
   const debugContext = (optionOwner.debugRecords ?? []).slice(-8).map((record) => ({
     element: record.element,
     source: record.source ? { path: record.source.path, startLine: record.source.startLine, endLine: record.source.endLine, code: record.source.code } : null,
@@ -992,15 +1147,17 @@ export async function executeWithHarness(project, step, settings, feedback = "",
   const request = {
     id: requestId,
     kind: "execute_step",
+    agentRole: "executor",
+    ...workflowContext(project, step),
     targetStepID: step.id,
     targetSubprocessID: subprocess?.id ?? null,
     userGoal: project.goal,
     focus: `完成自适应执行图中的当前节点：${step.title}${subprocess ? ` / ${subprocess.title}` : ""}。${subprocess?.purpose ?? step.purpose}。只处理这个节点声明的范围并维护主交付物 ${project.primaryArtifact?.filename ?? project.artifact?.filename ?? "（尚未建立）"}；不得顺手推进其他节点。`,
-    modelPolicy: `${MODEL_POLICY} ${DIRECTION_CONFLICT_POLICY} ${EXECUTION_COMPLETION_POLICY} ${PREVIEW_GATE_POLICY} ${PREVIEW_TRACE_POLICY}${visualReferences.length ? ` ${VISUAL_REFERENCE_MODEL_POLICY}` : ""}`,
+    modelPolicy: `${MODEL_POLICY} ${EXECUTION_CONTEXT_POLICY} ${DIRECTION_CONFLICT_POLICY} ${EXECUTION_COMPLETION_POLICY} ${PREVIEW_GATE_POLICY} ${PREVIEW_SIZE_POLICY} ${["build", "integrate", "deliver"].includes(step.kind) ? PREVIEW_TRACE_POLICY : ""}${visualReferences.length ? ` ${VISUAL_REFERENCE_MODEL_POLICY}` : ""}`,
     originalRequirement: project.goal,
     sharedContext: compactSharedContext(relevantContext, project.goal),
     existingSteps: project.steps.filter((item) => relevantStepIds.has(item.id)).map((item) => ({ id: item.id, title: item.title, purpose: item.purpose, kind: item.kind, status: item.status, dependencies: item.dependencies })),
-    currentStep: { id: step.id, title: step.title, purpose: step.purpose, kind: step.kind, revision: step.revision },
+    currentStep: { id: step.id, title: step.title, purpose: step.purpose, kind: step.kind, riskLevel: step.riskLevel, revision: step.revision, writeScope: step.writeScope ?? [], acceptanceCriteria: step.acceptanceCriteria ?? [] },
     currentSubprocess: subprocess ? { id: subprocess.id, title: subprocess.title, purpose: subprocess.purpose, revision: subprocess.revision, selectedOptionId: subprocess.selectedOptionId, contextSnapshot: subprocess.contextSnapshot } : null,
     debugContext,
     ...(selectedOption ? { selectedOption: { ...selectedOption, userSelected: true, selectionAuthority: "user" } } : {}),
@@ -1030,7 +1187,21 @@ export async function executeWithHarness(project, step, settings, feedback = "",
     throwWithExecutionContext(error, { request, rawOutput, stepId: step.id });
   }
   if (response.needsUserDirection) return { needsUserDirection: true, ...response, request, rawOutput };
-  return { result: executionResultForServer(response), request, rawOutput };
+  const result = executionResultForServer(response);
+  // Negative verification already has evidence and must return for repair;
+  // an extra reviewer must not hide that result behind a second call failure.
+  if (step.kind === "verify" && result.verificationPassed === false) return { result, agentReview: null, route: resolveModelRoute(request, settings), request, rawOutput };
+  let agentReview = null;
+  if (settings.smartRouting !== false) {
+    try { agentReview = await reviewStepWithHarness({ project, step, result }, settings, signal, onEvent); }
+    catch (caught) {
+      const error = caught instanceof Error ? caught : new Error(String(caught));
+      error.completedExecution = { result, request, rawOutput, route: resolveModelRoute(request, settings), reviewPending: true };
+      error.message = `执行已返回结果，但独立审核未完成：${error.message}`;
+      throw error;
+    }
+  }
+  return { result, agentReview, route: resolveModelRoute(request, settings), request, rawOutput };
 }
 
 export async function executeProjectWithHarness(project, settings, feedback = "", signal, onEvent) {
@@ -1044,11 +1215,13 @@ export async function executeProjectWithHarness(project, settings, feedback = ""
   const request = {
     id: requestId,
     kind: "execute_project",
+    agentRole: "executor",
+    ...workflowContext(project),
     userGoal: project.goal,
     focus: `在已经创建的项目目录中端到端完成目标。不要等待每个 Graph 节点再次派发；按 selectedPlan 连续推进，并始终维护唯一主交付物 ${project.primaryArtifact?.filename ?? "（未声明）"}。Graph 节点只用于返回可追溯检查点。`,
-    modelPolicy: `${MODEL_POLICY} ${EXECUTION_COMPLETION_POLICY} ${PREVIEW_GATE_POLICY} ${PREVIEW_TRACE_POLICY}${visualReferences.length ? ` ${VISUAL_REFERENCE_MODEL_POLICY}` : ""}`,
+    modelPolicy: `${MODEL_POLICY} ${EXECUTION_COMPLETION_POLICY} ${PREVIEW_GATE_POLICY} ${PREVIEW_SIZE_POLICY} ${PREVIEW_TRACE_POLICY}${visualReferences.length ? ` ${VISUAL_REFERENCE_MODEL_POLICY}` : ""}`,
     originalRequirement: project.goal,
-    sharedContext: compactSharedContext(project.context, project.goal),
+    sharedContext: compactSharedContext(scopeContextForRole(project.context, "executor", { dependencyIds: project.steps.map((item) => item.id) }), project.goal),
     selectedPlan,
     primaryArtifact: project.primaryArtifact,
     currentArtifact: project.artifact,
@@ -1073,7 +1246,9 @@ export async function executeProjectWithHarness(project, settings, feedback = ""
   if (project.primaryArtifact && (response.result.artifact.filename !== project.primaryArtifact.filename || response.result.artifact.kind !== project.primaryArtifact.kind)) {
     throw new Error(`连续执行返回的 ${response.result.artifact.filename}（${response.result.artifact.kind}）与锁定主交付物 ${project.primaryArtifact.filename}（${project.primaryArtifact.kind}）不一致。`);
   }
-  return { request, response, result: executionResultForServer(response), checkpoints: response.checkpoints, rawOutput };
+  const result = executionResultForServer(response);
+  const finalReview = settings.smartRouting === false ? null : await finalReviewWithHarness({ ...project, artifact: result.artifact }, settings, signal, onEvent);
+  return { request, response, result, checkpoints: response.checkpoints, finalReview, rawOutput };
 }
 
 export async function tracePreviewWithHarness({ project, step, subprocess, target, element, candidates }, settings, signal) {
@@ -1082,6 +1257,7 @@ export async function tracePreviewWithHarness({ project, step, subprocess, targe
   const request = {
     id: requestId,
     kind: "trace_preview_source",
+    agentRole: "tracer",
     userGoal: project.goal,
     focus: "根据预览目标、用户可观察线索和限定候选，判断最可能负责该界面的源码位置。只能选择候选，不能修改文件；没有精确追溯证据时不得声称精确定位。",
     modelPolicy: MODEL_POLICY,
@@ -1124,6 +1300,7 @@ export async function learnWithHarness({ project, selection, module = "explanati
   const request = {
     id: requestId,
     kind: question ? "learning_follow_up" : documentMode ? "learning_explain_document" : "learning_explain_selection",
+    agentRole: "learning",
     systemPrompt: LEARNING_MODEL_POLICY,
     modelPolicy: LEARNING_MODEL_POLICY,
     projectContext: project ? { title: project.title, goal: project.goal } : null,
@@ -1145,6 +1322,7 @@ export async function summarizeRepositoryWithHarness({ project, source, document
   const request = {
     id: requestId,
     kind: "learning_repository_document_overviews",
+    agentRole: "learning",
     systemPrompt: LEARNING_MODEL_POLICY,
     modelPolicy: LEARNING_MODEL_POLICY,
     projectContext: project ? { title: project.title, goal: project.goal } : null,
@@ -1167,6 +1345,7 @@ export async function exploreWithHarness({ project = null, query, history = [], 
   const request = {
     id: requestId,
     kind: normalizedKind === "art" ? "visual_art_research" : "trusted_public_research",
+    agentRole: "search",
     explorationKind: normalizedKind,
     systemPrompt: modelPolicy,
     modelPolicy,

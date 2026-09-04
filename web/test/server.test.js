@@ -36,7 +36,10 @@ test("本机服务提供页面并保护写接口", async () => {
     await writeFile(path.join(directory, "AGENTS.md"), "# 测试规则\n");
     const page = await fetch(runtime.url);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /DSH Workflow/);
+    const html = await page.text();
+    assert.match(html, /<title>LoopCanvas<\/title>/);
+    assert.match(html, /<html lang="en">/);
+    assert.match(html, /id="setting-language"/);
 
     const bootstrap = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
     assert.ok(bootstrap.token);
@@ -866,6 +869,10 @@ test("预览回溯由 Agent 在产物候选中选择并把反馈归档到步骤�
     assert.match(previewTrace, /#f59e0b/);
     assert.match(previewTrace, /meaningfulDOMGroup/);
     assert.match(previewTrace, /registerThree/);
+    assert.match(previewTrace, /inspectInteractionRegions/);
+    assert.match(previewTrace, /interactionRegions: interactionRegionPayload/);
+    assert.match(previewTrace, /assertInteractionRegionsCommitted/);
+    assert.match(previewTrace, /event\.key === "Shift"[\s\S]{0,320}openDesignMode\(\)/);
     assert.equal(runtime.store.project(project.id).steps[0].debugRecords.length, 1);
     assert.equal(runtime.store.project(project.id).steps[0].subprocesses[0].debugRecords.length, 1);
     const exact = await (await fetch(`${runtime.url}/api/projects/${project.id}/debug/locate`, { method: "POST", headers, body: JSON.stringify({ target: { kind: "three-object", traceId: "apple.leaf", label: "绿叶" } }) })).json();
@@ -874,6 +881,13 @@ test("预览回溯由 Agent 在产物候选中选择并把反馈归档到步骤�
     assert.equal(exact.record.confidence, 1);
     assert.match(exact.record.agentDecisionSummary, /无需 Agent 推测/);
     assert.equal(traceCalls, 1);
+    await runtime.store.mutate(() => {
+      project.artifact.kind = "text";
+      project.artifact.runCommands = ["npm run start"];
+    });
+    const runtimeExactResponse = await fetch(`${runtime.url}/api/projects/${project.id}/debug/locate`, { method: "POST", headers, body: JSON.stringify({ target: { kind: "three-object", traceId: "apple.leaf", label: "绿叶" } }) });
+    assert.equal(runtimeExactResponse.status, 200);
+    assert.equal((await runtimeExactResponse.json()).record.locationMethod, "exact");
     const feedback = await fetch(`${runtime.url}/api/projects/${project.id}/steps/build-button/debug/${located.record.id}`, { method: "POST", headers, body: JSON.stringify({ feedback: "按钮文案改成保存项目" }) });
     assert.equal(feedback.status, 200);
     assert.equal((await feedback.json()).repairQueued, true);
@@ -935,6 +949,7 @@ test("新项目在固定目录中只调用一次 Agent 连续构建并把 Graph 
     }
   });
   try {
+    await runtime.store.mutate((state) => { state.settings.smartRouting = false; });
     const bootstrap = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
     const headers = { "Content-Type": "application/json", "X-LoopCanvas-Token": bootstrap.token };
     const created = await (await fetch(`${runtime.url}/api/projects`, { method: "POST", headers, body: JSON.stringify({ goal: "连续构建演示页面" }) })).json();
@@ -1059,6 +1074,7 @@ test("自适应 single 在首调用内直接验证并交付，不再二次执行
     executeWithHarness: async () => { throw new Error("single 不应触发第二次执行"); }
   });
   try {
+    await runtime.store.mutate((state) => { state.settings.smartRouting = false; });
     const bootstrap = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
     const headers = { "Content-Type": "application/json", "X-LoopCanvas-Token": bootstrap.token };
     const created = await (await fetch(`${runtime.url}/api/projects`, { method: "POST", headers, body: JSON.stringify({ goal: "做一个简单页面" }) })).json();
@@ -1070,6 +1086,85 @@ test("自适应 single 在首调用内直接验证并交付，不再二次执行
     assert.equal(project.phase, "complete");
     assert.equal(project.artifact.filename, "index.html");
     assert.deepEqual(project.steps.map((step) => step.status), ["approved"]);
+    const revision = await fetch(`${runtime.url}/api/projects/${project.id}/revise`, { method: "POST", headers, body: JSON.stringify({ feedback: "整体重做视觉方向，并严格落实 Qwen 标志参考。" }) });
+    assert.equal(revision.status, 200);
+    const revisionPayload = await revision.json();
+    assert.equal(revisionPayload.stepId, project.steps[0].id);
+    assert.equal(revisionPayload.repairQueued, true);
+    assert.equal(project.phase, "workspace");
+    assert.equal(project.executionRun.status, "ready");
+    assert.equal(project.steps[0].status, "ready");
+    assert.match(project.steps[0].lastFeedback, /Qwen/);
+  } finally {
+    await new Promise((resolve) => runtime.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("一步直达返修会补取既有 SVG 参考且不要求虚构方案", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-adaptive-single-svg-repair-"));
+  const workspace = path.join(directory, "deliverables");
+  let receivedReference = null;
+  let extractionCalls = 0;
+  const runtime = await startServer({
+    port: 0, dataDirectory: directory, workspace,
+    extractPublicSource: async ({ url }) => {
+      extractionCalls += 1;
+      if (extractionCalls % 2 === 1) return {
+        content: "<!doctype html><title>temporary redirect page</title>",
+        metadata: { finalUrl: url, contentType: "text/html", charCount: 51, truncated: false, codeBlockCount: 0 }
+      };
+      return {
+        content: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 583 171"><path fill="#615ced" d="M10 85h150"/></svg>',
+        metadata: { finalUrl: url, contentType: "image/svg+xml", charCount: 117, truncated: false, codeBlockCount: 0 }
+      };
+    },
+    executeWithHarness: async (project) => {
+      receivedReference = project.executionReferences[0];
+      const html = "<!doctype html><main>参考 SVG 后的返修结果</main>";
+      await mkdir(project.workspace, { recursive: true });
+      await writeFile(path.join(project.workspace, "index.html"), html);
+      return { request: { id: "repair-svg" }, rawOutput: "{}", result: {
+        assistantMessage: "已按 SVG 源码返修。", summary: "已返修", actualChanges: ["index.html"], evidence: ["已读取 SVG 源码"],
+        deviation: "无", rollback: "恢复 index.html", verificationPassed: true, blockingIssues: [],
+        visualReferencesUsed: [{ id: project.executionReferences[0].id, appliedAs: "参考矢量路径与比例", evidence: "index.html" }],
+        requiresPreview: true, previewReason: "检查返修结果",
+        artifact: { title: "返修页面", kind: "html", content: html, filename: "index.html", projectRoot: project.workspace, files: [], entrypoint: "index.html", dependencies: [], runCommands: [], testCommands: [], testResults: [] }
+      } };
+    }
+  });
+  try {
+    const bootstrap = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
+    const headers = { "Content-Type": "application/json", "X-LoopCanvas-Token": bootstrap.token };
+    const created = await (await fetch(`${runtime.url}/api/projects`, { method: "POST", headers, body: JSON.stringify({ goal: "参考 Qwen logo 返修页面" }) })).json();
+    const project = runtime.store.project(created.project.id);
+    const added = await (await fetch(`${runtime.url}/api/projects/${project.id}/references`, { method: "POST", headers, body: JSON.stringify({ reference: {
+      type: "portfolio", title: "File:Qwen Logo.svg", url: "https://commons.wikimedia.org/wiki/File:Qwen_Logo.svg", mediaKind: "image", sourceName: "Wikimedia Commons"
+    } }) })).json();
+    await runtime.store.mutate(() => {
+      const reference = project.executionReferences.find((item) => item.id === added.reference.id);
+      reference.visual = { mode: "metadata-only", pixelAccess: false, agentText: "旧版仅元数据" };
+      reference.extractedContent = "";
+      reference.extractionStatus = "summary-only";
+      reference.extractionAttemptedAt = null;
+      project.workspace = workspace;
+      project.executionMode = "adaptive-single";
+      project.executionRun = { status: "ready", completedAt: null, error: null, awaitingStepIds: [] };
+      project.phase = "workspace";
+      project.primaryArtifact = { title: "返修页面", kind: "html", filename: "index.html", entrypoint: "index.html", acceptanceCriteria: ["页面可打开"] };
+      project.artifact = { title: "旧页面", kind: "html", content: "<main>旧</main>", filename: "index.html", projectRoot: workspace, files: [], entrypoint: "index.html" };
+      project.artifactStepId = "single";
+      project.steps = [{ id: "single", title: "直接交付", purpose: "返修", kind: "deliver", riskLevel: "L1", status: "ready", revision: 2, dependencies: [], options: [], selectedOptionId: null, subprocesses: [], conversation: [], debugRecords: [], acceptanceCriteria: ["页面可打开"], writeScope: ["index.html"] }];
+    });
+    const preflight = await (await fetch(`${runtime.url}/api/projects/${project.id}/steps/single/execute/preflight`, { method: "POST", headers, body: "{}" })).json();
+    assert.equal(preflight.readiness.allowed, true);
+    const executed = await fetch(`${runtime.url}/api/projects/${project.id}/steps/single/execute`, { method: "POST", headers, body: JSON.stringify({ feedback: "加强几何感" }) });
+    assert.equal(executed.status, 200);
+    assert.equal(extractionCalls, 4);
+    assert.equal(receivedReference.visual.mode, "svg-source");
+    assert.equal(receivedReference.extractionMetadata.attempts, 2);
+    assert.match(receivedReference.extractionMetadata.sourceURL, /Special:Redirect\/file\/Qwen%20Logo\.svg/);
+    assert.match(receivedReference.visual.agentText, /viewBox="0 0 583 171"/);
   } finally {
     await new Promise((resolve) => runtime.server.close(resolve));
     await rm(directory, { recursive: true, force: true });
@@ -1406,6 +1501,179 @@ test("自适应 graph 可手动指定一个就绪节点且不会自动推进其�
     const runtimePayload = await (await fetch(`${runtime.url}/api/projects/${projectId}/runtime`)).json();
     assert.equal(runtimePayload.runtime.active, false);
     assert.equal(runtimePayload.runtime.activity, "等待手动执行");
+  } finally {
+    await new Promise((resolve) => runtime.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("审核退回后自适应重跑收到返修意见且不会保留旧产物或运行态", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-agent-repair-feedback-"));
+  const workspace = path.join(directory, "workspace");
+  await mkdir(workspace, { recursive: true });
+  await writeFile(path.join(workspace, "index.html"), "<!doctype html><main>draft</main>");
+  const feedbacks = [];
+  let call = 0;
+  const runtime = await startServer({
+    port: 0, dataDirectory: directory, workspace,
+    executeWithHarness: async (_project, step, _settings, feedback) => {
+      call += 1;
+      feedbacks.push(feedback);
+      const artifact = { title: "页面", kind: "html", content: "", filename: "index.html", projectRoot: workspace, files: [], entrypoint: "index.html", dependencies: [], runCommands: [], testCommands: [], testResults: [] };
+      return {
+        request: { id: `repair-${call}` }, rawOutput: "{}",
+        route: { role: "executor", runtime: "codex", model: "gpt-5.6-luna", effort: "high", available: true },
+        result: { assistantMessage: "已执行", summary: "页面草稿", actualChanges: ["index.html"], evidence: ["文件存在"], deviation: "无", rollback: "恢复文件", verificationPassed: true, blockingIssues: [], artifact },
+        agentReview: call === 1
+          ? { verdict: "repair", summary: "按钮不可访问", findings: [{ severity: "major", criterion: "按钮可用", evidence: "缺少标签", repairInstruction: "补充 aria-label" }], verifiedEvidence: [], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } }
+          : { verdict: "pass", summary: "按钮已复核", findings: [], verifiedEvidence: ["aria-label 已存在"], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } }
+      };
+    }
+  });
+  try {
+    const bootstrap = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
+    const headers = { "Content-Type": "application/json", "X-LoopCanvas-Token": bootstrap.token };
+    const created = await (await fetch(`${runtime.url}/api/projects`, { method: "POST", headers, body: JSON.stringify({ goal: "做页面" }) })).json();
+    const project = runtime.store.project(created.project.id);
+    await runtime.store.mutate(() => {
+      project.workspace = workspace;
+      project.executionMode = "adaptive-graph";
+      project.primaryArtifact = { title: "页面", kind: "html", filename: "index.html", entrypoint: "index.html", acceptanceCriteria: ["页面可打开"], projectRoot: workspace };
+      project.steps = [{ id: "deliver", title: "交付", purpose: "交付页面", kind: "deliver", riskLevel: "L1", status: "ready", revision: 1, dependencies: [], parallelSafe: false, writeScope: ["index.html"], acceptanceCriteria: ["页面可打开"], conversation: [], debugRecords: [], subprocesses: [], result: null }];
+    });
+    const first = await fetch(`${runtime.url}/api/projects/${project.id}/run`, { method: "POST", headers, body: JSON.stringify({ mode: "sequential", stepId: "deliver" }) });
+    assert.equal(first.status, 200);
+    assert.equal(project.steps[0].status, "ready");
+    assert.equal(project.steps[0].revision, 2);
+    assert.equal(project.artifact, null);
+    assert.equal(project.executionRun.status, "ready");
+    assert.equal(project.pendingAction, null);
+    const second = await fetch(`${runtime.url}/api/projects/${project.id}/run`, { method: "POST", headers, body: JSON.stringify({ mode: "sequential", stepId: "deliver" }) });
+    assert.equal(second.status, 200);
+    assert.match(feedbacks[1], /按钮不可访问/);
+    assert.match(feedbacks[1], /补充 aria-label/);
+    assert.equal(project.steps[0].status, "approved");
+    assert.equal(project.artifact.filename, "index.html");
+  } finally {
+    await new Promise((resolve) => runtime.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("主动复审上游被退回会失效已批准下游和旧产物", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-manual-review-repair-"));
+  const runtime = await startServer({
+    port: 0, dataDirectory: directory, workspace: path.join(directory, "workspace"),
+    reviewStepWithHarness: async ({ step }) => ({ verdict: "repair", summary: "基础实现需要返修", findings: [{ severity: "major", criterion: "基础正确", evidence: "发现旧实现", repairInstruction: "重做基础实现" }], verifiedEvidence: [], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } })
+  });
+  try {
+    const bootstrap = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
+    const headers = { "Content-Type": "application/json", "X-LoopCanvas-Token": bootstrap.token };
+    const created = await (await fetch(`${runtime.url}/api/projects`, { method: "POST", headers, body: JSON.stringify({ goal: "复审链" }) })).json();
+    const project = runtime.store.project(created.project.id);
+    await runtime.store.mutate(() => {
+      project.executionMode = "adaptive-graph";
+      project.primaryArtifact = { title: "页面", kind: "html", filename: "index.html", entrypoint: "index.html", acceptanceCriteria: ["可打开"], projectRoot: project.workspace };
+      project.artifact = { filename: "index.html" };
+      project.artifactStepId = "deliver";
+      project.steps = [
+        { id: "build", title: "构建", kind: "build", status: "approved", revision: 1, dependencies: [], conversation: [], subprocesses: [], result: { summary: "旧构建" }, agentReview: { verdict: "pass" } },
+        { id: "deliver", title: "交付", kind: "deliver", status: "approved", revision: 1, dependencies: ["build"], conversation: [], subprocesses: [], result: { summary: "旧交付", artifact: { filename: "index.html" } }, agentReview: { verdict: "pass" } }
+      ];
+    });
+    const response = await fetch(`${runtime.url}/api/projects/${project.id}/steps/build/agent-review`, { method: "POST", headers, body: "{}" });
+    assert.equal(response.status, 200);
+    assert.equal(project.steps[0].status, "ready");
+    assert.equal(project.steps[0].agentReview.verdict, "repair");
+    assert.equal(project.steps[1].status, "locked");
+    assert.equal(project.steps[1].result, null);
+    assert.equal(project.steps[1].agentReview, null);
+    assert.equal(project.artifact, null);
+    assert.equal(project.executionRun.status, "ready");
+  } finally {
+    await new Promise((resolve) => runtime.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("方向节点也经 Sol high 审核后才允许构建并进入最终裁决", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-decision-review-chain-"));
+  const workspace = path.join(directory, "workspace");
+  await mkdir(workspace, { recursive: true });
+  await writeFile(path.join(workspace, "index.html"), "<!doctype html><main>done</main>");
+  let directionReviews = 0;
+  let finalReviews = 0;
+  const runtime = await startServer({
+    port: 0, dataDirectory: directory, workspace, enforceAgentReviewChain: true,
+    reviewStepWithHarness: async ({ step }) => {
+      directionReviews += 1;
+      if (directionReviews === 1) throw new Error("审核服务暂时不可用");
+      if (directionReviews === 2) return { verdict: "repair", summary: "方向说明不完整", findings: [{ severity: "major", criterion: "方向已记录", evidence: "缺少范围", repairInstruction: "重新确认范围" }], verifiedEvidence: [], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } };
+      return { verdict: "pass", summary: "方向记录完整", findings: [], verifiedEvidence: ["用户选择已记录"], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } };
+    },
+    executeWithHarness: async (_project, step) => ({ request: { id: step.id }, rawOutput: "{}", route: { role: "executor", runtime: "codex", model: step.kind === "deliver" ? "gpt-5.6-terra" : "gpt-5.6-luna", effort: "high", available: true }, result: { assistantMessage: `${step.title}完成`, summary: `${step.title}完成`, actualChanges: step.kind === "deliver" ? ["index.html"] : [], evidence: ["已验证"], deviation: "无", rollback: "恢复", verificationPassed: true, blockingIssues: [], artifact: step.kind === "deliver" ? { title: "页面", kind: "html", content: "", filename: "index.html", projectRoot: workspace, files: [], entrypoint: "index.html", dependencies: [], runCommands: [], testCommands: [], testResults: [] } : null }, agentReview: { verdict: "pass", summary: "节点通过", findings: [], verifiedEvidence: ["已复查"], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } } }),
+    finalReviewWithHarness: async () => {
+      finalReviews += 1;
+      if (finalReviews === 1) return { verdict: "repair", summary: "需要重新确认方向", findings: [{ severity: "major", criterion: "可打开", evidence: "最终页面与方向不一致", repairInstruction: "重新选择方向后再构建" }], verifiedEvidence: [], acceptanceResults: [{ criterion: "可打开", passed: false, evidence: "方向需重选" }], repairStepIds: ["direction"], route: { role: "judge", runtime: "codex", model: "gpt-5.6-sol", effort: "xhigh", available: true } };
+      return { verdict: "pass", summary: "最终通过", findings: [], verifiedEvidence: ["入口已复查"], acceptanceResults: [{ criterion: "可打开", passed: true, evidence: "HTTP 200" }], repairStepIds: [], route: { role: "judge", runtime: "codex", model: "gpt-5.6-sol", effort: "xhigh", available: true } };
+    }
+  });
+  try {
+    await runtime.store.mutate((state) => { state.settings.smartRouting = true; state.settings.agentRuntime = "codex"; });
+    const bootstrap = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
+    const headers = { "Content-Type": "application/json", "X-LoopCanvas-Token": bootstrap.token };
+    const created = await (await fetch(`${runtime.url}/api/projects`, { method: "POST", headers, body: JSON.stringify({ goal: "带方向门的页面" }) })).json();
+    const project = runtime.store.project(created.project.id);
+    await runtime.store.mutate(() => {
+      project.workspace = workspace;
+      project.executionMode = "adaptive-graph";
+      project.primaryArtifact = { title: "页面", kind: "html", filename: "index.html", entrypoint: "index.html", acceptanceCriteria: ["可打开"], projectRoot: workspace };
+      project.steps = [
+        { id: "direction", title: "选方向", purpose: "确认风格", kind: "decision", status: "ready", revision: 1, dependencies: [], requiresUserDirection: true, directionQuestion: "选择风格", directionOptions: [{ id: "calm", label: "克制", description: "低疲劳" }, { id: "bold", label: "醒目", description: "高对比" }], directionAnswer: "", conversation: [], subprocesses: [], acceptanceCriteria: ["方向已记录"] },
+        { id: "build", title: "构建", purpose: "制作页面", kind: "build", status: "locked", revision: 1, dependencies: ["direction"], parallelSafe: false, writeScope: ["index.html"], conversation: [], subprocesses: [], acceptanceCriteria: ["结构完成"] },
+        { id: "deliver", title: "交付", purpose: "交付页面", kind: "deliver", status: "locked", revision: 1, dependencies: ["build"], parallelSafe: false, writeScope: ["index.html"], conversation: [], subprocesses: [], acceptanceCriteria: ["可打开"] }
+      ];
+    });
+    const failedDirection = await fetch(`${runtime.url}/api/projects/${project.id}/steps/direction/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "calm" }) });
+    assert.equal(failedDirection.status, 400);
+    assert.equal(project.steps[0].status, "ready");
+    assert.equal(project.steps[0].directionAnswer, "");
+    assert.equal(project.steps[0].agentReview, null);
+    assert.equal(project.executionRun.status, "awaiting_direction");
+    const repairDirection = await fetch(`${runtime.url}/api/projects/${project.id}/steps/direction/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "calm" }) });
+    assert.equal(repairDirection.status, 200);
+    assert.equal(project.steps[0].status, "ready");
+    assert.equal(project.steps[0].directionAnswer, "");
+    assert.equal(project.steps[0].agentReview.verdict, "repair");
+    assert.equal(project.executionRun.status, "awaiting_direction");
+    const direction = await fetch(`${runtime.url}/api/projects/${project.id}/steps/direction/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "calm", supplemental: "仅处理首页" }) });
+    assert.equal(direction.status, 200);
+    assert.equal(directionReviews, 3);
+    assert.equal(project.steps[0].status, "approved");
+    assert.equal(project.steps[0].agentReview.verdict, "pass");
+    assert.equal(project.steps[1].status, "ready");
+    const run = await fetch(`${runtime.url}/api/projects/${project.id}/run`, { method: "POST", headers, body: JSON.stringify({ mode: "sequential" }) });
+    assert.equal(run.status, 200);
+    assert.equal(finalReviews, 1);
+    assert.equal(project.finalReview.verdict, "repair");
+    assert.equal(project.steps[0].status, "ready");
+    assert.equal(project.steps[0].selectedDirectionOptionId, null);
+    assert.equal(project.steps[0].directionSupplement, "");
+    assert.equal(project.steps[0].directionAnswer, "");
+    assert.equal(project.steps[1].status, "locked");
+    assert.equal(project.steps[2].status, "locked");
+    assert.equal(project.executionRun.status, "awaiting_direction");
+    assert.deepEqual(project.executionRun.awaitingStepIds, ["direction"]);
+    const redirected = await fetch(`${runtime.url}/api/projects/${project.id}/steps/direction/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "bold", supplemental: "重新构建首页" }) });
+    assert.equal(redirected.status, 200);
+    assert.equal(directionReviews, 4);
+    assert.equal(project.steps[0].status, "approved");
+    const rerun = await fetch(`${runtime.url}/api/projects/${project.id}/run`, { method: "POST", headers, body: JSON.stringify({ mode: "sequential" }) });
+    assert.equal(rerun.status, 200);
+    assert.deepEqual(project.steps.map((step) => step.agentReview?.verdict), ["pass", "pass", "pass"]);
+    assert.equal(finalReviews, 2);
+    assert.equal(project.finalReview.verdict, "pass");
+    assert.equal(project.phase, "complete");
   } finally {
     await new Promise((resolve) => runtime.server.close(resolve));
     await rm(directory, { recursive: true, force: true });

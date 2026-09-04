@@ -101,7 +101,7 @@ function readableHTML(value) {
 export function extractReadableContent(body, contentType = "text/html") {
   const normalizedType = String(contentType).split(";")[0].trim().toLowerCase();
   const supported = normalizedType.startsWith("text/") || normalizedType === "application/json" || normalizedType.endsWith("+json")
-    || ["application/javascript", "application/xml", "application/xhtml+xml"].includes(normalizedType);
+    || ["application/javascript", "application/xml", "application/xhtml+xml", "image/svg+xml"].includes(normalizedType);
   if (!supported) throw new Error(`不支持读取 ${normalizedType || "未知格式"} 来源。`);
   const raw = String(body ?? "").replaceAll("\0", "").trim();
   if (!raw) throw new Error("来源返回了空内容。");

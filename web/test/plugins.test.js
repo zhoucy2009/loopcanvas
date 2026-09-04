@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { scanCapabilities } from "../src/capabilities.js";
 import { startServer } from "../src/server.js";
-import { buildDshPluginPatch, bundledPluginsRoot, DSH_PLUGIN_RUNTIME_VERSION, listPlugins, validateManifest } from "../src/plugins.js";
+import { buildDshPluginPatch, bundledPluginsRoot, DSH_PLUGIN_RUNTIME_VERSION, listPlugins, validateManifest, resolveBundledPluginsRoot } from "../src/plugins.js";
 
 test("validateManifest 拒绝不完整的清单", () => {
   assert.throws(() => validateManifest({ schemaVersion: 1, id: "x" }), /缺少必填字段 name/);
@@ -115,4 +115,17 @@ test("本机 Codex 插件使用 manifest 名称而不是 .codex-plugin 目录名
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+
+test("plugin roots support both source checkouts and installed npm packages", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-package-plugins-"));
+  try {
+    const source = path.join(directory, "web", "src");
+    await mkdir(source, { recursive: true });
+    await mkdir(path.join(directory, "plugins"));
+    assert.equal(resolveBundledPluginsRoot(source), path.join(directory, "plugins"));
+    await mkdir(path.join(directory, "web", "plugins"));
+    assert.equal(resolveBundledPluginsRoot(source), path.join(directory, "web", "plugins"));
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

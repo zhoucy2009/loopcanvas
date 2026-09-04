@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DSH Workflow Web</title>
+  <title>LoopCanvas</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
     <aside id="project-sidebar" class="sidebar" aria-label="项目导航">
       <div class="brand">
         <div class="brand-mark">L</div>
-        <div><strong>DSH Workflow</strong><span>DeepSeek Harness WebUI</span></div>
+        <div><strong>LoopCanvas</strong><span>Agent workflow workbench</span></div>
       </div>
       <button id="new-project" class="primary wide">＋ 新需求</button>
       <div class="section-label">工作项目</div>
@@ -29,6 +29,7 @@
     </aside>
 
     <main class="main-area">
+      <div id="agent-stage" class="agent-stage" aria-label="四位 Agent 的工作与待命状态"></div>
       <header class="topbar">
         <div>
           <div class="eyebrow">AUTOMATIC · PREVIEW-GATED WORKFLOW</div>
@@ -40,6 +41,10 @@
           <button data-app-mode="exploration" aria-pressed="false">探索</button>
         </nav>
         <div class="top-actions">
+          <button id="voice-control" class="ghost compact voice-trigger" type="button" aria-controls="voice-panel" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="8" height="12" rx="4"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"></path></svg>
+            <span>语音</span>
+          </button>
           <button id="open-remote" class="ghost compact remote-trigger" aria-controls="remote-panel" aria-expanded="false"><span class="remote-trigger-dot" aria-hidden="true"></span>Remote</button>
           <button class="ghost compact" data-global-view="context">上下文</button>
           <button class="ghost compact" data-global-view="log">决策记录</button>
@@ -64,6 +69,40 @@
       </footer>
     </main>
   </div>
+
+  <aside id="voice-panel" class="voice-panel" aria-hidden="true" aria-labelledby="voice-panel-title" inert>
+    <header class="voice-panel-header">
+      <div><div class="eyebrow">VOICE CONTROL · 中文</div><h2 id="voice-panel-title">说出下一步</h2></div>
+      <button id="close-voice" class="icon-button" type="button" aria-label="关闭语音控制">×</button>
+    </header>
+    <div id="voice-state" class="voice-state idle" role="status" aria-live="polite" aria-atomic="true">
+      <span class="voice-state-mark" aria-hidden="true"></span>
+      <div><strong id="voice-state-title">准备聆听</strong><span id="voice-state-detail">点击下方按钮后说一句完整命令</span></div>
+    </div>
+    <p id="voice-transcript" class="voice-transcript" aria-live="polite">识别内容会显示在这里。</p>
+    <p id="voice-wake-status" class="voice-wake-status" role="status" aria-live="polite">开启聆听后，说“规划 / 执行 / 审核”或“hey，…”唤醒</p>
+    <section id="voice-confirmation" class="voice-confirmation" aria-live="assertive" hidden>
+      <strong>确认写入操作</strong><p id="voice-confirmation-detail"></p>
+      <div><button id="voice-confirm" class="primary compact" type="button">确认</button><button id="voice-cancel" class="secondary compact" type="button">取消</button></div>
+    </section>
+    <button id="voice-listen" class="primary wide voice-listen" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="8" height="12" rx="4"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"></path></svg>
+      <span>开始聆听</span>
+    </button>
+    <section class="voice-examples" aria-labelledby="voice-examples-title">
+      <strong id="voice-examples-title">可以这样说</strong>
+      <ul>
+        <li>规划 / hey，规划</li><li>执行 / hey，执行</li><li>审核 / hey，审核</li><li>开一个新需求</li><li>集合 / hey，集合</li>
+        <li>帮我策划……</li><li>执行第……步</li><li>审核一下</li>
+        <li>最终审核一下</li><li>帮我搜……</li><li>我需要学……</li>
+      </ul>
+    </section>
+    <section class="voice-route-guide" aria-labelledby="voice-route-guide-title">
+      <strong id="voice-route-guide-title">当前 Agent 路由</strong>
+      <dl><div><dt>规划</dt><dd data-voice-route="plan">等待路由</dd></div><div><dt>执行</dt><dd data-voice-route="execute">等待节点路由</dd></div><div><dt>审核</dt><dd data-voice-route="review">等待路由</dd></div><div><dt>终审</dt><dd data-voice-route="judge">等待路由</dd></div></dl>
+    </section>
+    <p class="voice-privacy">免点击唤醒：运行 macOS 菜单栏程序 LoopCanvas Wake，首次授权后即使关闭网页也能唤醒。上方按钮仅控制浏览器语音；菜单栏可停止后台监听。执行写入仍需确认。</p>
+  </aside>
 
   <aside id="remote-panel" class="remote-panel" aria-hidden="true" aria-label="Remote 设备">
     <header class="remote-panel-header">
@@ -111,10 +150,13 @@
         <div><div class="eyebrow">LOCAL AGENT RUNTIMES</div><h2>本机 Agent 运行时</h2></div>
         <button value="cancel" class="icon-button" aria-label="关闭">×</button>
       </div>
+      <label class="language-setting">界面语言<select id="setting-language" aria-label="界面语言"><option value="en" translate="no">English</option><option value="zh-CN" translate="no">中文</option></select></label>
+      <p class="language-note">切换后自动保存，项目内容保持原文。</p>
       <p class="settings-intro">检测并选择 dsh 或 Codex。DeepSeek Harness 保持成熟默认通道；选择 Codex 后，后续规划、执行、学习与探索会改走本机 App Server。</p>
       <div id="install-guide" class="install-guide"></div>
       <label>当前执行引擎<select id="setting-runtime"><option value="dsh">DeepSeek Harness (dsh)</option><option value="codex">Codex App Server</option></select></label>
       <p id="runtime-choice-note" class="runtime-choice-note" role="status" aria-live="polite"></p>
+      <label class="smart-routing-toggle"><input id="setting-smart-routing" type="checkbox"><span><strong>启用智能路由</strong><small>智能路由仅可由 Codex 执行；选择 dsh 时请保持关闭，否则角色任务会被明确拒绝，不会冒充 Sol / Terra / Luna。</small></span></label>
       <div id="dsh-runtime-fields" class="runtime-fields">
         <label>dsh 可执行文件（留空自动检测）<input id="setting-dsh" placeholder="/完整路径/dsh"></label>
         <div class="form-grid">
@@ -123,9 +165,12 @@
         </div>
       </div>
       <div id="codex-runtime-fields" class="runtime-fields hidden">
+        <div class="smart-routing-matrix" aria-label="智能路由角色分工">
+          <div><span>规划者</span><strong>Sol high</strong></div><div><span>学习 / 搜索</span><strong>Luna light</strong></div><div><span>执行者</span><strong>按节点选择</strong></div><div><span>审核 / 终审</span><strong>Sol high / xhigh</strong></div>
+        </div>
         <div class="form-grid">
-          <label>Codex 模型<select id="setting-codex-model" disabled><option value="">等待加载模型目录…</option></select></label>
-          <label>Codex 推理强度<select id="setting-codex-effort" disabled><option value="">由模型决定</option></select></label>
+          <label>Codex 回退模型<select id="setting-codex-model" disabled><option value="">等待加载模型目录…</option></select></label>
+          <label>回退推理强度<select id="setting-codex-effort" disabled><option value="">由模型决定</option></select></label>
         </div>
         <p id="codex-model-status" class="runtime-status" role="status" aria-live="polite"></p>
       </div>

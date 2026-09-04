@@ -33,6 +33,13 @@ test("来源解析返回正文及可追溯元数据", async () => {
   assert.equal(result.metadata.truncated, false);
 });
 
+test("SVG 来源保留可供 Agent 审计的矢量源码", () => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#615ced" d="M8 32c0-14 10-24 24-24s24 10 24 24-10 24-24 24S8 46 8 32Z"/></svg>`;
+  const result = extractReadableContent(svg, "image/svg+xml");
+  assert.match(result.content, /viewBox="0 0 64 64"/);
+  assert.match(result.content, /fill="#615ced"/);
+});
+
 test("来源正文限制为 80000 字符并标记截断", () => {
   const result = extractReadableContent("x".repeat(90_000), "text/plain");
   assert.equal(result.content.length, 80_000);

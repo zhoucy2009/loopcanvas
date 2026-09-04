@@ -1,16 +1,21 @@
+import { SMART_ROLE_PROMPTS, assertRoleMatchesKind, roleForRequest } from "./smart-routing.js";
+
 function runtimeLabel(runtime) {
   return runtime === "codex" ? "Codex App Server" : "DeepSeek Harness";
 }
 
-function taskBoundary(kind) {
+function taskBoundary(kind, request = {}) {
   if (kind === "route_project") {
-    return "先判断任务是否可一步完成。若为 single，在当前调用内直接实现、验证并交付；若为 graph，只返回 Harness 真正需要的执行节点与依赖，本次不修改文件。不得为了展示流程人为拆步。";
+    if (request.smartRouting === false) {
+      return "本次使用兼容交付协议：可以返回 single 并在同一次调用内完成实现与验证，也可以返回 Graph；若返回 Graph，本次只规划不修改文件。严格遵守 request.responseInstructions。";
+    }
+    return "本次只做规划。返回一至十二个 Harness 真正需要的执行节点与依赖；即使任务可一步完成，也只返回单节点 Graph，不实现、不验证交付、不修改文件。不得为了展示流程人为拆步。";
   }
   if (kind === "execute_project") {
     return "连续完成 request.selectedPlan 中的全部里程碑，并持续维护唯一主交付物；里程碑是同一次执行的检查点，不得在每个节点停下等待再次派发。";
   }
   if (kind === "execute_step") {
-    return "只完成 request.focus 指定的定点修正，遵守用户已选方案并保持既定主交付物可用；不得顺手推进无关里程碑。";
+    return "完成 request.currentStep 与 request.focus 指定的当前节点（可能是首次构建、验证或返修），继承 request.confirmedDirections 的上游用户决定并保持锁定主交付物；不得顺手推进无关里程碑。";
   }
   if (kind === "plan_first_step") {
     return "只生成完整成果路线和验收标准，不创建、修改或删除项目文件，也不把计划冒充已经执行。";
@@ -45,6 +50,8 @@ export function buildAgentPrompt({
   if (!requestPath && request === undefined) throw new Error("构造 Agent 提示词时缺少 request 或 requestPath。");
 
   const kind = request?.kind ?? "unknown";
+  const role = request?.smartRouting === false ? "" : roleForRequest(request);
+  assertRoleMatchesKind(role, kind);
   const input = requestPath
     ? [
         "## 原始请求（唯一事实来源）",
@@ -61,17 +68,22 @@ export function buildAgentPrompt({
     `你由 LoopCanvas 本机界面通过 ${runtimeLabel(runtime)} 调用。`,
     [
       "## 目标与解释边界",
-      "你是 LoopCanvas 的任务交付 Agent。把用户原始要求落实为准确、可验证的结果，不替用户重定义目标。",
+      role ? `你是 LoopCanvas 的 ${role} 角色 Agent。严格在本角色权限内处理请求，不替用户重定义目标。` : "你是 LoopCanvas 的任务交付 Agent。把用户原始要求落实为准确、可验证的结果，不替用户重定义目标。",
       "可以在内部整理口语化表达，但不得改变原意、遗漏硬约束、增加未要求功能、扩大范围或替换用户已选方案。关键歧义影响安全、权限、兼容性或验收时，不得猜测，必须如实返回阻断。directionAnswer 非空不等于歧义已解决；若其中约束互相排斥、在逻辑或物理上不能同时满足，或与原始要求、用户已选方案冲突，必须在调用工具或修改文件前返回澄清问题，不得自行挑选、合并或忽略其中一项。"
     ].join("\n"),
     [
       `## 当前任务边界（${kind}）`,
-      taskBoundary(kind),
+      taskBoundary(kind, request),
       `工作目录：${workspace}`,
       accessBoundary,
-      "不得修改 LoopCanvas 编排器或触碰工作目录外路径。",
+      "不得修改 LoopCanvas 编排器或项目目录外的用户文件；可只读读取明确提供的附件路径、环境提供的技能、运行库与工具文档，但不能据此扩大写入权限或读取无关私人数据。",
       extraBoundaries
     ].filter(Boolean).join("\n"),
+    role ? [
+      `## 当前 Agent 角色（${role}）`,
+      SMART_ROLE_PROMPTS[role],
+      "角色身份只用于明确职责，不会改变原始 request 的字段、优先级或用户目标。"
+    ].join("\n") : "",
     agents ? `## 项目 AGENTS.md（必须遵守）\n${agents}` : "",
     constitution ? `## 项目宪法（不可违反的底线规则）\n${constitution}` : "",
     [

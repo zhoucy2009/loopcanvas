@@ -162,7 +162,7 @@ function sourceCandidate(source, lineIndex, score, signals) {
 }
 
 export async function findPreviewSourceCandidates(artifact, rawElement, { limit = MAX_TRACE_CANDIDATES } = {}) {
-  if (!artifact || artifact.kind !== "html") throw new Error("只有 HTML 产物可以从预览回溯源码。");
+  if (!artifact) throw new Error("当前项目没有可回溯的产物源码。");
   const target = normalizedTraceTarget(rawElement);
   const element = target.element;
   if (!target.traceId && !target.objectName && !target.label && !element.tag && !element.id && !element.classes.length && !element.text) throw new Error("预览目标缺少可用于回溯的线索。");

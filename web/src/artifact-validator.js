@@ -1,7 +1,8 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 
-const resourcePattern = /(?:src|href)\s*=\s*["']([^"']+)["']/gi;
+const resourcePattern = /\b(src|href)\s*=\s*["']([^"']+)["']/gi;
+const tagPattern = /<([a-z][\w:-]*)\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
 const inlineModulePattern = /<script\b[^>]*\btype\s*=\s*["']module["'][^>]*>([\s\S]*?)<\/script>/gi;
 const bareThreeImportPattern = /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)["']three(?:\/addons\/[^"']+)?["']/;
 
@@ -97,8 +98,11 @@ export async function validateArtifact(artifact, step) {
   if (inlineModulesUseBareThree(html) && !resolveThreeModuleDependency(artifact.dependencies)) {
     throw new Error('HTML 使用裸模块导入 "three"，但 dependencies 缺少 three@精确版本或等价的受支持 CDN URL。');
   }
-  for (const match of html.matchAll(resourcePattern)) {
-    const resource = match[1].trim();
+  const resources = [...html.matchAll(tagPattern)].flatMap((tag) =>
+    [...tag[0].matchAll(resourcePattern)].map((match) => ({ tag: tag[1].toLowerCase(), attribute: match[1].toLowerCase(), resource: match[2].trim() })));
+  for (const { tag, attribute, resource } of resources) {
+    // User-followed citations are navigation, not automatically loaded assets.
+    if (["a", "area"].includes(tag) && attribute === "href" && /^https:\/\//i.test(resource)) continue;
     if (/^https:\/\//i.test(resource) && !isDeclaredCDNResource(resource, artifact.dependencies)) {
       throw new Error(`HTML 引用了未授权的远程资源（未声明依赖或不受支持 CDN）：${resource}`);
     }

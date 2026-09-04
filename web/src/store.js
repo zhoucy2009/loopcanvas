@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { dependencyStepIds } from "./workflow-context.js";
 
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 const MAX_PROJECT_CHECKPOINTS = 40;
 
@@ -118,6 +119,7 @@ export function defaultState(defaultWorkspace) {
       reasoningEffort: "off",
       codexModel: "",
       codexReasoningEffort: "",
+      smartRouting: false,
       cardPolicy: "high-risk-only",
       cautionLevel: "medium"
     },
@@ -170,6 +172,9 @@ function normalizeProject(project, defaultWorkspace = "") {
   project.isPaused ??= false;
   project.handoff ??= null;
   project.pendingAction ??= null;
+  project.finalReview ??= null;
+  project.agentRuns = Array.isArray(project.agentRuns) ? project.agentRuns : [];
+  if (project.finalReview?.status === "running") project.finalReview = { ...project.finalReview, status: "failed", error: "最终审核在应用退出时中断，可重新触发。" };
   project.learningThreads ??= [];
   project.archivedLearningThreads ??= [];
   project.deletedLearningThreads ??= [];
@@ -216,6 +221,8 @@ function normalizeProject(project, defaultWorkspace = "") {
     step.impactAnalysis ??= null;
     step.conversation ??= [];
     step.debugRecords = Array.isArray(step.debugRecords) ? step.debugRecords : [];
+    step.routing = step.routing && typeof step.routing === "object" ? step.routing : null;
+    step.agentReview = step.agentReview && typeof step.agentReview === "object" ? step.agentReview : null;
     step.cautionLevel = normalizeCautionLevel(step.cautionLevel, null);
     step.requiresUserDirection = Boolean(step.requiresUserDirection);
     step.directionQuestion = String(step.directionQuestion ?? "").trim();
@@ -260,11 +267,29 @@ function migrateState(decoded, defaultWorkspace) {
   return decoded;
 }
 
+function restoreStateInPlace(target, snapshot) {
+  if (Array.isArray(target) && Array.isArray(snapshot)) {
+    const existing = new Map(target.filter((item) => item?.id).map((item) => [item.id, item]));
+    target.splice(0, target.length, ...snapshot.map((item) => {
+      const original = item?.id ? existing.get(item.id) : null;
+      if (original) { restoreStateInPlace(original, item); return original; }
+      return structuredClone(item);
+    }));
+    return;
+  }
+  for (const key of Object.keys(target)) if (!Object.hasOwn(snapshot, key)) delete target[key];
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value && typeof value === "object" && target[key] && typeof target[key] === "object" && Array.isArray(value) === Array.isArray(target[key])) restoreStateInPlace(target[key], value);
+    else target[key] = structuredClone(value);
+  }
+}
+
 export class StateStore {
   constructor(filePath, defaultWorkspace) {
     this.filePath = filePath;
     this.defaultWorkspace = defaultWorkspace;
     this.state = defaultState(defaultWorkspace);
+    this.mutationQueue = Promise.resolve();
   }
 
   async load() {
@@ -297,16 +322,21 @@ export class StateStore {
     await rename(temporary, this.filePath);
   }
 
-  async mutate(mutator) {
-    const before = this.snapshot();
-    try {
-      const result = await mutator(this.state);
-      await this.save();
-      return result;
-    } catch (error) {
-      this.state = before;
-      throw error;
-    }
+  mutate(mutator) {
+    const transaction = this.mutationQueue.then(async () => {
+      const before = this.snapshot();
+      try {
+        const result = await mutator(this.state);
+        this.state.stateRevision = Number(before.stateRevision ?? 0) + 1;
+        await this.save();
+        return result;
+      } catch (error) {
+        restoreStateInPlace(this.state, before);
+        throw error;
+      }
+    });
+    this.mutationQueue = transaction.catch(() => {});
+    return transaction;
   }
 
   project(projectId) {
@@ -338,6 +368,8 @@ export class StateStore {
       isPaused: false,
       handoff: null,
       pendingAction: null,
+      finalReview: null,
+      agentRuns: [],
       pinnedAt: null,
       learningThreads: [],
       archivedLearningThreads: [],
@@ -417,6 +449,7 @@ export class StateStore {
       if (CAUTION_LEVELS.includes(input.cautionLevel)) state.settings.cautionLevel = input.cautionLevel;
       const codexModel = String(input.codexModel ?? state.settings.codexModel ?? "").trim();
       const codexReasoningEffort = String(input.codexReasoningEffort ?? state.settings.codexReasoningEffort ?? "").trim();
+      if (typeof input.smartRouting === "boolean") state.settings.smartRouting = input.smartRouting;
       if (!codexModel || /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(codexModel)) state.settings.codexModel = codexModel;
       if (!codexReasoningEffort || /^[A-Za-z][A-Za-z0-9-]{0,31}$/.test(codexReasoningEffort)) state.settings.codexReasoningEffort = codexReasoningEffort;
     });
@@ -562,6 +595,8 @@ export function applyAdaptiveRoute(project, route) {
     debugRecords: [],
     subprocesses: [],
     selectedSubprocessId: null,
+    routing: null,
+    agentReview: null,
     cautionLevel: normalizeCautionLevel(step.cautionLevel, null),
     requiresUserDirection: Boolean(step.requiresUserDirection),
     directionQuestion: String(step.directionQuestion ?? "").trim(),
@@ -579,6 +614,7 @@ export function applyAdaptiveRoute(project, route) {
     ? { status: "running", startedAt: now, completedAt: null, error: null }
     : { status: "ready", startedAt: null, completedAt: null, error: null };
   project.parallelPreference = "ask";
+  project.finalReview = null;
   project.selectedStepId = project.steps[0]?.id ?? null;
   project.agents = [{ id: randomUUID(), name: executionShape === "single" ? "一步交付 Agent" : "自适应执行 Agent", focus: executionShape === "single" ? "判断并直接交付" : "判断真实执行节点与依赖", status: executionShape === "single" ? "running" : "complete", progress: executionShape === "single" ? 0.5 : 1, notes: [route.assistantMessage || "已判断任务执行形态"] }];
   project.phase = executionShape === "single" ? "running" : "workspace";
@@ -709,13 +745,30 @@ export function rejectStep(project, stepId, feedback, targetSubprocessId = null)
   project.updatedAt = now;
 }
 
-export function reopenStep(project, stepId, feedback = "", targetSubprocessId = null) {
+export function reopenForRepair(project, stepId, feedback = "", targetSubprocessId = null, findings = []) {
   const step = project.steps.find((item) => item.id === stepId);
-  if (!step || step.status !== "approved") throw new Error("只有已通过步骤可以重新打开。");
+  if (!step || (!["approved", "review"].includes(step.status) && !(step.status === "error" && step.reviewPending && step.result))) throw new Error("只有已通过或待审核步骤可以进入 Agent 返修。");
+  const normalizedFindings = (Array.isArray(findings) ? findings : []).map((item) => ({
+    severity: String(item?.severity ?? "major"),
+    criterion: String(item?.criterion ?? "").trim(),
+    evidence: String(item?.evidence ?? "").trim(),
+    repairInstruction: String(item?.repairInstruction ?? item?.repair_instruction ?? "").trim()
+  })).filter((item) => item.criterion || item.evidence || item.repairInstruction);
   step.revision += 1;
   step.status = "ready";
   step.result = null;
+  step.agentReview = null;
+  step.reviewPending = false;
+  step.routing = null;
+  step.lastError = null;
   step.lastFeedback = String(feedback).trim() || "用户重新打开已通过步骤。";
+  step.repairFindings = normalizedFindings;
+  const resetsDirection = step.kind === "decision" && step.requiresUserDirection;
+  if (resetsDirection) {
+    step.selectedDirectionOptionId = null;
+    step.directionSupplement = "";
+    step.directionAnswer = "";
+  }
   const subprocess = targetSubprocessId
     ? step.subprocesses?.find((item) => item.id === targetSubprocessId && item.status === "approved")
     : [...(step.subprocesses ?? [])].reverse().find((item) => item.status === "approved");
@@ -728,10 +781,24 @@ export function reopenStep(project, stepId, feedback = "", targetSubprocessId = 
     subprocess.result = null;
     step.selectedSubprocessId = subprocess.id;
   }
-  markDescendantsStale(project, stepId);
+  if (project.executionMode?.startsWith("adaptive")) invalidateAdaptiveDescendants(project, stepId);
+  else markDescendantsStale(project, stepId);
+  if (project.executionMode?.startsWith("adaptive")) {
+    project.artifact = null;
+    project.artifactStepId = null;
+    project.artifactSubprocessId = null;
+    project.phase = "workspace";
+    project.executionRun = { status: resetsDirection ? "awaiting_direction" : "ready", startedAt: null, completedAt: null, error: null, awaitingStepIds: resetsDirection ? [step.id] : [] };
+    project.pendingAction = null;
+    project.lastError = null;
+  }
   appendContext(project, "correction", `重新打开「${step.title}」：${step.lastFeedback}`, step.id, "用户");
   appendLog(project, "revision", "重新打开已确认步骤", "受影响的下游已标记为需复核。", step.id);
   recomputeAvailability(project);
+}
+
+export function reopenStep(project, stepId, feedback = "", targetSubprocessId = null) {
+  return reopenForRepair(project, stepId, feedback, targetSubprocessId);
 }
 
 export function rollbackStep(project, stepId) {
@@ -807,13 +874,15 @@ export function moveStep(project, stepId, beforeStepId) {
 
 export function returnVerificationToRepair(project, stepId, feedback = "") {
   const verification = project.steps.find((step) => step.id === stepId);
-  if (!verification || verification.kind !== "verify" || verification.status !== "review") throw new Error("当前步骤不是待验收验证步骤。");
-  const ancestors = new Set(verification.dependencies);
-  let repair = [...project.steps].reverse().find((step) => ancestors.has(step.id) && ["build", "integrate", "deliver"].includes(step.kind) && step.status === "approved");
-  if (!repair) repair = [...project.steps].reverse().find((step) => ["build", "integrate"].includes(step.kind) && step.status === "approved");
+  if (!verification || verification.kind !== "verify" || !["review", "error"].includes(verification.status)) throw new Error("当前步骤不是待验收或未通过的验证步骤。");
+  const ancestors = dependencyStepIds(project, verification);
+  const repair = [...project.steps].reverse().find((step) => ancestors.has(step.id) && ["build", "integrate", "deliver"].includes(step.kind) && step.status === "approved");
   if (!repair) throw new Error("没有找到可返回修复的上游产物步骤。");
   const issues = [...(verification.result?.blockingIssues ?? []), String(feedback).trim()].filter(Boolean).join("；");
   reopenStep(project, repair.id, `验证未通过：${issues || "请修复后重新验证"}`);
+  project.lastError = null;
+  project.pendingAction = null;
+  if (project.executionRun) project.executionRun = { ...project.executionRun, status: "ready", error: null, completedAt: null };
   project.selectedStepId = repair.id;
 }
 
@@ -857,8 +926,9 @@ export function executionReadiness(project, stepId, subprocessId = null) {
   const availableOptions = Array.isArray(optionOwner.options) ? optionOwner.options : [];
   const selectedOption = availableOptions.find((option) => option.id === optionOwner.selectedOptionId);
   const requiresPlanRefresh = Boolean(subprocess && availableOptions.length === 0);
+  const adaptiveWithoutOptions = project.executionMode?.startsWith("adaptive") && !subprocess && availableOptions.length === 0;
   if (requiresPlanRefresh) reasons.push("这个子进程没有独立方案。它来自旧版计划结构；为避免误用其他子进程的方案，请返回需求输入并重新生成执行路线。");
-  else if (!selectedOption) reasons.push(`请先为${subprocess ? "当前子进程" : "这个步骤"}选择一个方案。`);
+  else if (!selectedOption && !adaptiveWithoutOptions) reasons.push(`请先为${subprocess ? "当前子进程" : "这个步骤"}选择一个方案。`);
   if (missingSteps.length) reasons.push(`缺少已验收的前置步骤：${missingSteps.map((item) => item?.title ?? "已删除步骤").join("、")}。`);
   if (missingSubprocesses.length) reasons.push(`现在执行会缺少本步骤的前序产物，结果质量可能不稳定。请先完成并验收：${missingSubprocesses.map((item) => item.title).join("、")}。`);
   if (subprocess) {
@@ -870,9 +940,26 @@ export function executionReadiness(project, stepId, subprocessId = null) {
     if (step.status === "review") reasons.push("这个步骤正在等待验收；请先接受结果或提出修改意见。");
     if (step.status === "approved") reasons.push("这个步骤已经验收；如需修改，请先重新打开它。");
   }
+  const title = requiresPlanRefresh
+    ? "需要刷新执行路线"
+    : project.isPaused
+      ? "任务已暂停"
+      : [step.status, subprocess?.status].includes("running")
+        ? "当前步骤正在执行"
+        : [step.status, subprocess?.status].includes("review")
+          ? "当前结果等待验收"
+          : [step.status, subprocess?.status].includes("approved")
+            ? "当前步骤已经验收"
+            : missingSteps.length || missingSubprocesses.length
+              ? "建议先完成前面的步骤"
+              : !selectedOption && !adaptiveWithoutOptions
+                ? "需要选择执行方案"
+                : reasons.length
+                  ? "暂时不能执行"
+                  : "前置检查通过";
   return {
     allowed: reasons.length === 0,
-    title: requiresPlanRefresh ? "需要刷新执行路线" : reasons.length ? "建议先完成前面的步骤" : "前置检查通过",
+    title,
     reasons,
     requiresPlanRefresh,
     stepId: step.id,
@@ -901,6 +988,19 @@ function markDescendantsStale(project, stepId) {
     const step = project.steps.find((item) => item.id === id);
     if (step && step.status === "approved") step.status = "stale";
     else if (step && !["running", "review"].includes(step.status)) step.status = "locked";
+  }
+}
+
+function invalidateAdaptiveDescendants(project, stepId) {
+  for (const id of downstreamIds(project, stepId)) {
+    const step = project.steps.find((item) => item.id === id);
+    if (!step) continue;
+    step.status = "locked";
+    step.result = null;
+    step.agentReview = null;
+    step.routing = null;
+    step.repairFindings = [];
+    step.lastError = null;
   }
 }
 

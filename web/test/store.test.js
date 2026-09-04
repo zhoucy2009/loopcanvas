@@ -4,8 +4,23 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  analyzeDirectives, answerStepDirection, approveStep, applyAdaptiveRoute, applyPlan, executionReadiness, moveStep, readyAdaptiveSteps, recoverInterruptedAdaptiveExecution, rejectStep, reopenStep, rollbackStep, SCHEMA_VERSION, setStepCaution, StateStore
+  analyzeDirectives, answerStepDirection, approveStep, applyAdaptiveRoute, applyPlan, executionReadiness, moveStep, readyAdaptiveSteps, recoverInterruptedAdaptiveExecution, rejectStep, reopenForRepair, reopenStep, rollbackStep, SCHEMA_VERSION, setStepCaution, StateStore
 } from "../src/store.js";
+
+test("并发 mutate 串行保存且失败事务不会让旧项目引用失效", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-store-concurrency-"));
+  try {
+    const store = new StateStore(path.join(directory, "state.json"), path.join(directory, "workspace"));
+    await store.load();
+    const project = store.project((await store.createProject({ goal: "并发状态" })).id);
+    const first = store.mutate(async () => { await new Promise((resolve) => setTimeout(resolve, 15)); project.title = "第一个"; });
+    const failed = store.mutate(() => { project.title = "不应保留"; throw new Error("回滚"); });
+    const last = store.mutate(() => { project.goal = "最后一个"; });
+    await first; await assert.rejects(failed, /回滚/); await last;
+    assert.equal(project, store.project(project.id)); assert.equal(project.title, "第一个"); assert.equal(project.goal, "最后一个");
+    assert.ok(store.state.stateRevision >= 3);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("StateStore 原子保存项目并可重新载入", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-store-"));
@@ -85,6 +100,20 @@ test("整个计划可浏览，但执行前置检查会精确指出缺失依赖�
   assert.match(qualityGuard.reasons.join(" "), /结果质量可能不稳定/);
   project.steps[1].subprocesses[0].status = "approved";
   assert.equal(executionReadiness(project, "build", "write").allowed, true);
+});
+
+test("自适应一步直达返修不要求不存在的方案或前序步骤", () => {
+  const project = {
+    executionMode: "adaptive-single", isPaused: false, artifact: { filename: "index.html" },
+    steps: [{ id: "single", title: "直接交付", kind: "deliver", status: "ready", dependencies: [], options: [], selectedOptionId: null, subprocesses: [] }]
+  };
+  const readiness = executionReadiness(project, "single");
+  assert.equal(readiness.allowed, true);
+  assert.equal(readiness.title, "前置检查通过");
+  assert.deepEqual(readiness.missingStepIds, []);
+  assert.deepEqual(readiness.missingSubprocessIds, []);
+  project.steps[0].status = "running";
+  assert.equal(executionReadiness(project, "single").title, "当前步骤正在执行");
 });
 
 test("连续项目登记主交付物前禁止退回单步执行", () => {
@@ -178,6 +207,7 @@ test("DeepSeek 与 Codex 分别保存模型设置并可切换执行引擎", asyn
     assert.equal(store.state.settings.cautionLevel, "high");
     assert.equal(store.state.settings.codexModel, "gpt-test");
     assert.equal(store.state.settings.codexReasoningEffort, "low");
+    assert.equal(store.state.settings.smartRouting, false);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -381,6 +411,34 @@ test("返工上游会让已通过下游进入 stale", () => {
   reopenStep(project, "one", "修改基础结构");
   assert.equal(project.steps[0].status, "ready");
   assert.equal(project.steps[1].status, "stale");
+});
+
+test("自适应最终返修统一使产物失效并携带审核 findings", () => {
+  const project = { phase: "complete", executionMode: "adaptive-graph", workspace: "/tmp/project", artifact: { filename: "index.html" }, artifactStepId: "one", artifactSubprocessId: null, executionRun: { status: "completed" }, pendingAction: { status: "done" }, updatedAt: "", context: [], decisionLog: [], steps: [] };
+  applyPlan(project, [{ id: "one", title: "制作", purpose: "", kind: "build", dependencies: [], options: [] }, { id: "two", title: "交付", purpose: "", kind: "deliver", dependencies: ["one"], options: [] }]);
+  project.executionMode = "adaptive-graph";
+  project.artifact = { filename: "index.html" };
+  project.artifactStepId = "one";
+  project.executionRun = { status: "completed" };
+  project.pendingAction = { status: "done" };
+  project.steps[0].status = "approved";
+  project.steps[1].status = "approved";
+  project.steps[0].agentReview = { verdict: "pass" };
+  project.steps[1].result = { summary: "旧交付" };
+  project.steps[1].agentReview = { verdict: "pass" };
+  project.steps[1].routing = { model: "旧模型" };
+  reopenForRepair(project, "one", "入口需要修复", null, [{ severity: "major", criterion: "入口可用", repairInstruction: "修复入口" }]);
+  assert.equal(project.artifact, null);
+  assert.equal(project.executionRun.status, "ready");
+  assert.equal(project.pendingAction, null);
+  assert.equal(project.steps[1].status, "locked");
+  assert.equal(project.steps[1].result, null);
+  assert.equal(project.steps[1].agentReview, null);
+  assert.equal(project.steps[1].routing, null);
+  assert.equal(project.steps[0].agentReview, null);
+  assert.equal(project.steps[0].repairFindings[0].criterion, "入口可用");
+  project.steps[0].status = "approved";
+  assert.deepEqual(readyAdaptiveSteps(project).map((step) => step.id), ["two"]);
 });
 
 test("验证失败不能误验收", () => {

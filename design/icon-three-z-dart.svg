@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="zGradient" x1="350" y1="245" x2="650" y2="545" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7659D9"/>
+      <stop offset="1" stop-color="#2539A8"/>
+    </linearGradient>
+    <linearGradient id="facetGradient" x1="530" y1="310" x2="650" y2="485" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#394BBE"/>
+      <stop offset="1" stop-color="#202C86"/>
+    </linearGradient>
+    <filter id="contactShadow" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#11195F" flood-opacity="0.18"/>
+    </filter>
+    <mask id="centerCut">
+      <rect width="1024" height="1024" fill="white"/>
+      <path d="M512 487L536 529H488L512 487Z" fill="black"/>
+    </mask>
+    <g id="zModule">
+      <path
+        d="M354 244H658L710 296V334L541 474H592L625 507L592 540H430L397 507L568 334H354V244Z"
+        fill="url(#zGradient)"
+        filter="url(#contactShadow)"
+      />
+      <path
+        d="M658 244L710 296V334L541 474L498 431L568 334H615L658 291V244Z"
+        fill="url(#facetGradient)"
+        opacity="0.92"
+      />
+    </g>
+  </defs>
+
+  <g mask="url(#centerCut)">
+    <use href="#zModule"/>
+    <use href="#zModule" transform="rotate(120 512 512)"/>
+    <use href="#zModule" transform="rotate(240 512 512)"/>
+  </g>
+</svg>

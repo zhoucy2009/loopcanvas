@@ -15,10 +15,10 @@ function parseArguments(argv) {
     if (argv[index] === "--remote-insecure-test") result.remoteInsecure = true;
   }
   if (!Number.isInteger(result.port) || result.port < 0 || result.port > 65535) {
-    throw new Error("--port 必须是 0–65535 之间的整数。");
+    throw new Error("--port must be an integer between 0 and 65535.");
   }
-  if (!Number.isInteger(result.remotePort) || result.remotePort < 0 || result.remotePort > 65535) throw new Error("--remote-port 必须是 0–65535 之间的整数。");
-  if (result.remote && !result.remoteURL) throw new Error("开启 Remote 必须通过 --remote-url 或 LOOPCANVAS_REMOTE_URL 提供公共 HTTPS 地址。");
+  if (!Number.isInteger(result.remotePort) || result.remotePort < 0 || result.remotePort > 65535) throw new Error("--remote-port must be an integer between 0 and 65535.");
+  if (result.remote && !result.remoteURL) throw new Error("Remote requires a public HTTPS URL via --remote-url or LOOPCANVAS_REMOTE_URL.");
   return result;
 }
 
@@ -48,9 +48,9 @@ try {
       whatsappAllowedNumbers: list(process.env.LOOPCANVAS_WHATSAPP_NUMBERS)
     }
   });
-  console.log(`DSH Workflow Web 已启动：${runtime.url}`);
-  if (runtime.remoteServer) console.log(`Remote 受限入口已启动：${options.remoteURL}（本地代理目标 ${runtime.remoteURL}）`);
-  console.log("管理界面和完整 API 仅保留在本机。按 Ctrl+C 停止。");
+  console.log(`LoopCanvas is running at ${runtime.url}`);
+  if (runtime.remoteServer) console.log(`Restricted Remote listener: ${options.remoteURL} (local proxy target: ${runtime.remoteURL})`);
+  console.log("The admin UI and full API are local only. Press Ctrl+C to stop.");
   if (options.open) openBrowser(runtime.url);
   const stop = () => {
     runtime.remoteServer?.close();
@@ -59,6 +59,6 @@ try {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 } catch (error) {
-  console.error(`DSH Workflow Web 启动失败：${error.message}`);
+  console.error(`LoopCanvas failed to start: ${error.message}`);
   process.exit(1);
 }

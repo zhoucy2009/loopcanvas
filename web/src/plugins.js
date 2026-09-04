@@ -1,10 +1,16 @@
 import { access, readdir, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-// 内置插件目录：仓库根目录 plugins/（随 dshwf-web 发布；开发时即本仓库）。
-const bundledPluginsRoot = path.resolve(here, "..", "..", "plugins");
+// npm packages contain plugins/ beside src/. Source checkouts keep it one
+// directory higher. Prefer the installed bundle so npm users get the catalog.
+export function resolveBundledPluginsRoot(sourceDirectory = here) {
+  const packaged = path.resolve(sourceDirectory, "..", "plugins");
+  return existsSync(packaged) ? packaged : path.resolve(sourceDirectory, "..", "..", "plugins");
+}
+const bundledPluginsRoot = resolveBundledPluginsRoot();
 
 const REQUIRED_FIELDS = [
   "schemaVersion", "id", "name", "kind", "category", "package",
