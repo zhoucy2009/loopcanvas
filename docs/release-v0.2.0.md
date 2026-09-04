@@ -23,7 +23,7 @@ npm install -g ./dshwf-web-0.2.0.tgz
 dshwf-web
 ```
 
-Requires Node.js 20+ and your own configured Codex or DeepSeek runtime. The CLI opens `http://127.0.0.1:4317` in your default browser. Add `--no-open` or `--port 4318` as needed.
+Requires Node.js 24+ and your own configured Codex or DeepSeek runtime. The CLI opens `http://127.0.0.1:4317` in your default browser. Add `--no-open` or `--port 4318` as needed.
 
 The npm registry shortcut `npx dshwf-web@latest` remains pending the owner's npm authentication and first publication. This attached archive can already be installed using npm. Repository authorization is required while the repository remains private.
 

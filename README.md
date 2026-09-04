@@ -10,7 +10,7 @@ The browser interface opens in **English** by default. Choose **English / 中文
 
 ## Get started
 
-Requirements: **Node.js 20+**, npm, and a configured local **Codex** or **DeepSeek Harness** runtime. Agent usage is handled by your runtime account.
+Requirements: **Node.js 24+**, npm, and a configured local **Codex** or **DeepSeek Harness** runtime. Agent usage is handled by your runtime account.
 
 ### Install the release with npm
 

@@ -6,7 +6,7 @@ The interface defaults to **English**. Switch to **中文** in **Settings → In
 
 ## Install and run
 
-Requires **Node.js 20+** and a configured local Codex or DeepSeek Harness runtime.
+Requires **Node.js 24+** and a configured local Codex or DeepSeek Harness runtime.
 
 Download `dshwf-web-0.2.0.tgz` from the [GitHub release](https://github.com/zhoucy2009/loopcanvas/releases/tag/v0.2.0), then:
 

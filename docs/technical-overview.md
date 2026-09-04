@@ -64,7 +64,7 @@ Four DeepSeek Harness presets and 30 official plugin manifests describe purpose,
 ## Runtime transport and storage
 
 - **Client:** vanilla HTML/CSS/ES modules; no framework or frontend bundling requirement. Authored UI text uses a bilingual catalog. Template chunks are translated before interpolation, leaving user content, source code, IDs, and URLs untouched. English is the default; the browser stores language choice.
-- **Server:** Node.js 20+ HTTP service with localhost binding, Host validation, token-protected mutations, local state, artifact validation, and scoped source browsing.
+- **Server:** Node.js 24+ HTTP service with localhost binding, Host validation, token-protected mutations, local state, artifact validation, and scoped source browsing.
 - **Codex:** local stdio App Server transport, model discovery, isolated role sessions, and structured results. General desktop client-tool forwarding, approval forwarding, and full desktop session memory are not implemented. Image attachment support does not imply image-pixel input parity with the Codex desktop app.
 - **DeepSeek:** local executable discovery and headless calls. Output streams to disk; parsing tolerates surrounding explanatory text and some incomplete JSON endings. A 256 MiB safety limit produces an explicit error.
 - **Persistence:** schema-versioned multi-project `state.json`, per-project workspaces, redacted request/output records, diagnostics, and separate Remote state. The historical native app uses a separate data store.

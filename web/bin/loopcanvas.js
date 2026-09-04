@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { startServer } from "../src/server.js";
+
 
 function parseArguments(argv) {
   const result = { port: 4317, open: true, remote: process.env.LOOPCANVAS_REMOTE_ENABLED === "1", remoteHost: "127.0.0.1", remotePort: 4321, remoteURL: process.env.LOOPCANVAS_REMOTE_URL ?? "", remoteInsecure: false };
@@ -32,6 +32,8 @@ function openBrowser(url) {
 }
 
 try {
+  if (Number(process.versions.node.split(".")[0]) < 24) throw new Error("Node.js 24 or newer is required. Please upgrade Node.js before starting LoopCanvas.");
+  const { startServer } = await import("../src/server.js");
   const options = parseArguments(process.argv.slice(2));
   const runtime = await startServer({
     port: options.port,

@@ -21,7 +21,7 @@
 
 ## 本地运行
 
-需要 Node.js 20 或更高版本。智能路由使用已登录的本机 Codex App Server；也可关闭智能路由并使用 DeepSeek Harness 兼容模式，后者先启动/配置：
+需要 Node.js 24 或更高版本。智能路由使用已登录的本机 Codex App Server；也可关闭智能路由并使用 DeepSeek Harness 兼容模式，后者先启动/配置：
 
 ```sh
 npx @deepseek-ai/dsh web

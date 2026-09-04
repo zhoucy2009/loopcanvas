@@ -14,7 +14,7 @@
     "postpack": "node -e \"require('node:fs').rmSync('plugins',{recursive:true,force:true});\""
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "files": [
     "bin",
