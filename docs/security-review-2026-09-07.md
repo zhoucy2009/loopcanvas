@@ -43,8 +43,14 @@ of unknown vulnerabilities. External agent installations and optional Python
 model runtimes are outside the npm dependency audit. Existing v0.2.0 binary
 attachments are historical packages and do not include the current fixes.
 
-Rewriting branches and tags cannot erase someone else's clone or independently
-guarantee removal of GitHub's cached/unreachable objects. Do not merge old history
+Post-push verification confirmed that GitHub still returns personal author
+metadata when an old commit is requested directly by SHA. Keep the repository
+private until this remaining privacy issue is resolved. GitHub's
+[documented cleanup process](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)
+requires Support to assess eligibility and remove server-side cached views and
+unreachable objects; force-pushing alone cannot guarantee their removal.
+
+Rewriting branches and tags cannot erase someone else's clone. Do not merge old history
 back into the cleaned repository; existing clones should be replaced or carefully
 realigned. No live credentials were identified that require rotation.
 
