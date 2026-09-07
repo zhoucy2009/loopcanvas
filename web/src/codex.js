@@ -6,6 +6,8 @@ import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { buildAgentPrompt } from "./agent-prompt.js";
 import { resolveModelRoute, smartRoutingEnabled } from "./smart-routing.js";
+import { BROWSER_VERIFY_TOOL, verifyBrowserArtifact } from "./browser-verifier.js";
+import { discoverCodexInstallations } from "./codex-installation.js";
 
 const MAX_STREAM_BYTES = 32 * 1024 * 1024;
 
@@ -37,29 +39,16 @@ export async function resolveCodex({
   home = os.homedir(),
   envPath = process.env.PATH ?? "",
   platform = process.platform,
-  applicationsRoot = "/Applications"
+  applicationsRoot = "/Applications",
+  fallbackPaths
 } = {}) {
   if (explicitPath) return (await isExecutable(explicitPath)) ? explicitPath : null;
 
-  const executableName = platform === "win32" ? "codex.exe" : "codex";
-  for (const directory of envPath.split(path.delimiter).filter(Boolean)) {
-    const candidate = path.join(directory, executableName);
-    if (await isExecutable(candidate)) return candidate;
-  }
-
-  const candidates = [
-    ...(platform === "darwin" ? [path.join(applicationsRoot, "ChatGPT.app", "Contents", "Resources", "codex")] : []),
-    path.join(home, ".local", "bin", executableName),
-    "/opt/homebrew/bin/codex",
-    "/usr/local/bin/codex"
-  ];
-  for (const candidate of candidates) {
-    if (await isExecutable(candidate)) return candidate;
-  }
-  return null;
+  const installations = await discoverCodexInstallations({ home, envPath, platform, applicationsRoot, fallbackPaths });
+  return installations[0]?.path ?? null;
 }
 
-function createClient(executable, { cwd, signal, timeoutMs = 30 * 60 * 1000 } = {}) {
+function createClient(executable, { cwd, signal, onToolCall, timeoutMs = 30 * 60 * 1000 } = {}) {
   const child = spawn(executable, ["app-server", "--listen", "stdio://"], {
     cwd,
     env: {
@@ -101,6 +90,14 @@ function createClient(executable, { cwd, signal, timeoutMs = 30 * 60 * 1000 } = 
   const handleMessage = (message) => {
     if (message.id != null) {
       if (message.method) {
+        if (message.method === "item/tool/call" && onToolCall) {
+          Promise.resolve().then(() => onToolCall(message.params)).then((result) => {
+            if (!closing && !fatalError) send({ id: message.id, result });
+          }).catch((error) => {
+            if (!closing && !fatalError) send({ id: message.id, result: { success: false, contentItems: [{ type: "inputText", text: error.message }] } });
+          });
+          return;
+        }
         fail(new Error(`Codex 请求额外审批或客户端操作（${message.method}）；为安全起见已停止。`));
         return;
       }
@@ -173,9 +170,10 @@ function createClient(executable, { cwd, signal, timeoutMs = 30 * 60 * 1000 } = 
   return { request, notify, nextNotification, close };
 }
 
-async function initialize(client) {
+async function initialize(client, experimentalApi = false) {
   await client.request("initialize", {
-    clientInfo: { name: "loopcanvas_web", title: "LoopCanvas Web", version: "0.1.0" }
+    clientInfo: { name: "loopcanvas_web", title: "LoopCanvas Web", version: "0.1.0" },
+    ...(experimentalApi ? { capabilities: { experimentalApi: true } } : {})
   });
   client.notify("initialized", {});
 }
@@ -268,6 +266,98 @@ export async function listCodexModels(settings = {}, signal) {
   }
 }
 
+const CORE_CODEX_TOOLS = Object.freeze([
+  { name: "exec_command", title: "运行本机命令", description: "在工作流运行目录中执行命令并读取真实输出。", inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+  { name: "apply_patch", title: "修改工作区文件", description: "以补丁方式创建或修改工作流运行目录中的文件。", inputSchema: { type: "object", properties: { patch: { type: "string" } }, required: ["patch"] } },
+  { name: "web_search", title: "网页检索", description: "检索公开网页并返回可核查来源；是否可用取决于当前 Codex 配置和网络。", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+  { name: "view_image", title: "查看本机图像", description: "读取工作区中的图像供 Agent 检查。", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  { name: "loopcanvas_verify_browser", title: "隔离浏览器验收", description: "在 LoopCanvas 管理的隔离浏览器中渲染 HTML、截图并生成打印证据。", inputSchema: BROWSER_VERIFY_TOOL.inputSchema }
+]);
+
+function codexToolEntry(tool, { source = "codex-core", namespace = "", binding = null, available = true, unavailableReason = "" } = {}) {
+  const compactSchema = (schema, depth = 0) => {
+    if (!schema || typeof schema !== "object" || depth > 3) return schema;
+    if (Array.isArray(schema)) return schema.slice(0, 30).map((item) => compactSchema(item, depth + 1));
+    const result = {};
+    for (const key of ["type", "description", "required", "enum", "default", "minimum", "maximum", "additionalProperties"]) {
+      if (schema[key] !== undefined) result[key] = key === "description" ? String(schema[key]).slice(0, 500) : compactSchema(schema[key], depth + 1);
+    }
+    if (schema.properties && typeof schema.properties === "object") result.properties = Object.fromEntries(Object.entries(schema.properties).slice(0, 80).map(([key, value]) => [key, compactSchema(value, depth + 1)]));
+    if (schema.items !== undefined) result.items = compactSchema(schema.items, depth + 1);
+    for (const key of ["anyOf", "oneOf", "allOf"]) if (schema[key]) result[key] = compactSchema(schema[key], depth + 1);
+    return result;
+  };
+  return {
+    name: String(tool.name),
+    title: String(tool.title || tool.name),
+    description: String(tool.description || "Codex 工具").slice(0, 800),
+    arguments: compactSchema(tool.inputSchema ?? { type: "object" }),
+    source,
+    namespace,
+    binding: binding ?? { kind: source, name: String(tool.name) },
+    available,
+    unavailableReason
+  };
+}
+
+/** Return the tools Codex can expose to a workflow without executing any of them. */
+export async function listCodexTools(settings = {}, signal) {
+  const executable = await resolveCodex(executableSettings(settings));
+  const selected = settings.agentRuntime === "codex";
+  if (!executable) return CORE_CODEX_TOOLS.map((tool) => codexToolEntry(tool, { available: false, unavailableReason: "未找到 Codex App Server。" }));
+  const tools = CORE_CODEX_TOOLS.map((tool) => codexToolEntry(tool, { available: selected, unavailableReason: selected ? "" : "当前执行引擎不是 Codex App Server。" }));
+  const client = createClient(executable, { cwd: settings.workspace || os.tmpdir(), signal, timeoutMs: 30_000 });
+  try {
+    await initialize(client, true);
+    let cursor = null;
+    for (let page = 0; page < 10; page += 1) {
+      const result = await client.request("mcpServerStatus/list", { limit: 100, detail: "toolsAndAuthOnly", ...(cursor ? { cursor } : {}) }, { timeoutMs: 12_000 });
+      for (const server of Array.isArray(result.data) ? result.data : []) {
+        const runtimeAvailable = !["failed", "cancelled", "disabled", "authenticationRequired"].includes(server.runtimeStatus) && server.authStatus !== "notLoggedIn";
+        for (const definition of Object.values(server.tools ?? {})) {
+          const canonical = `mcp__${String(server.name).replace(/[^\w-]/g, "_")}__${String(definition.name).replace(/[^\w-]/g, "_")}`;
+          tools.push(codexToolEntry({ ...definition, name: canonical }, {
+            source: "codex-mcp",
+            namespace: String(server.name),
+            binding: { kind: "mcp", server: String(server.name), tool: String(definition.name) },
+            available: selected && runtimeAvailable,
+            unavailableReason: selected && runtimeAvailable ? "" : !selected ? "当前执行引擎不是 Codex App Server。" : server.authStatus === "notLoggedIn" ? "MCP 服务尚未登录。" : `MCP 服务状态：${server.runtimeStatus || "不可用"}`
+          }));
+        }
+      }
+      cursor = result.nextCursor || null;
+      if (!cursor) break;
+    }
+
+    const apps = [];
+    cursor = null;
+    for (let page = 0; page < 10; page += 1) {
+      const result = await client.request("app/list", { limit: 100, forceRefetch: false, ...(cursor ? { cursor } : {}) }, { timeoutMs: 12_000 }).catch(() => ({ data: [], nextCursor: null }));
+      apps.push(...(Array.isArray(result.data) ? result.data : []).filter((app) => app.isAccessible && app.isEnabled !== false));
+      cursor = result.nextCursor || null;
+      if (!cursor) break;
+    }
+    for (let offset = 0; offset < apps.length; offset += 100) {
+      const result = await client.request("app/read", { appIds: apps.slice(offset, offset + 100).map((app) => app.id), includeTools: true }, { timeoutMs: 12_000 }).catch(() => ({ apps: [] }));
+      for (const app of Array.isArray(result.apps) ? result.apps : []) for (const summary of app.toolSummaries ?? []) {
+        const canonical = `app__${String(app.id).replace(/[^\w-]/g, "_")}__${String(summary.name).replace(/[^\w-]/g, "_")}`;
+        tools.push(codexToolEntry({ ...summary, name: canonical, inputSchema: { type: "object", description: summary.description } }, {
+          source: "codex-app",
+          namespace: String(app.name),
+          binding: { kind: "app", appId: String(app.id), appName: String(app.name), tool: String(summary.name) },
+          available: selected && summary.isEnabled !== false && !summary.disabledReason,
+          unavailableReason: !selected ? "当前执行引擎不是 Codex App Server。" : String(summary.disabledReason || "")
+        }));
+      }
+    }
+    return tools;
+  } catch (error) {
+    return tools.map((tool) => tool.source === "codex-core" ? { ...tool, inventoryWarning: `动态工具目录读取失败：${error.message}` } : tool);
+  } finally {
+    client.close();
+  }
+}
+
 export function codexPrompt(request, workspace, options, writable) {
   return buildAgentPrompt({
     runtime: "codex",
@@ -275,8 +365,9 @@ export function codexPrompt(request, workspace, options, writable) {
     request,
     agents: options.agents,
     constitution: options.constitution,
+    extraBoundaries: writable ? "浏览器验收优先调用已提供的 loopcanvas_verify_browser（entrypoint 为项目相对 HTML 路径）。该工具由宿主管理独立无头浏览器与临时目录，返回实际截图、打印 PDF 和报告；不连接个人浏览器会话。渲染成功不等于验收通过，必须检查返回图像与打印证据。资源阻断或启动失败时如实报告，不得使用 --no-sandbox、个人 profile 或要求整体关闭执行沙盒。" : "",
     accessBoundary: writable
-      ? "当前为 workspace-write、允许按任务需要访问公开网络且不自动批准越权操作；所有文件创建、编辑和命令执行必须位于工作目录内。"
+      ? "当前为 workspace-write、允许按任务需要访问公开网络且不自动批准越权操作；项目文件写入与命令的工作目录必须位于项目内；可调用已安装的工具。宿主管理的隔离浏览器可使用专用临时目录，证据保存到项目内。"
       : "本次为 read-only、允许按任务需要访问公开网络且不自动批准越权操作；不得创建、修改或删除任何文件，不得运行会改变状态的命令。"
   });
 }
@@ -287,14 +378,29 @@ export async function invokeCodex(request, settings, options = {}, signal, onEve
   const workspace = path.resolve(options.workspace ?? settings.workspace);
   const route = resolveModelRoute(request, settings);
   onEvent?.({ type: "route", route });
-  const legacyWritable = request.kind === "route_project" || request.kind === "execute_step" || request.kind === "execute_project";
-  const writable = smartRoutingEnabled(settings, request) ? route.role === "executor" : legacyWritable;
+  const legacyWritable = request.kind === "route_project" || request.kind === "execute_step" || request.kind === "execute_project" || request.kind === "custom_workflow_execute";
+  const readonlyAnalysis = request.node?.type === "review" || (request.kind === "custom_workflow_execute" && ["agent_transcript_analyze", "agent_media_match"].includes(request.node?.tool));
+  const writable = !readonlyAnalysis && (smartRoutingEnabled(settings, request) ? route.role === "executor" : legacyWritable);
   let workingDirectory = workspace;
   if (writable) await mkdir(workspace, { recursive: true });
   else await access(workspace).catch(() => { workingDirectory = os.tmpdir(); });
-  const client = createClient(executable, { cwd: workingDirectory, signal });
+  let activeThreadId = "";
+  let browserBusy = false;
+  const browserLifetime = new AbortController();
+  const browserSignal = signal ? AbortSignal.any([signal, browserLifetime.signal]) : browserLifetime.signal;
+  const client = createClient(executable, { cwd: workingDirectory, signal, onToolCall: writable ? async (params) => {
+    if (params?.tool !== BROWSER_VERIFY_TOOL.name || params.namespace || params.threadId !== activeThreadId || !activeThreadId || !params.turnId || !params.callId) throw new Error("未授权的客户端工具请求。");
+    if (browserBusy) throw new Error("当前会话已有浏览器验收在运行，请等待结果后重试。");
+    browserBusy = true;
+    try {
+      onEvent?.({ type: "activity", activity: "隔离浏览器渲染与打印验收" });
+      const { report, screenshot } = await verifyBrowserArtifact(workspace, params.arguments, { signal: browserSignal });
+      return { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(report) },
+        ...(screenshot.length <= 8 * 1024 * 1024 ? [{ type: "inputImage", imageUrl: `data:image/png;base64,${screenshot.toString("base64")}` }] : [{ type: "inputText", text: "截图超过内联限制，请打开报告中的 screenshot 文件检查。" }])] };
+    } finally { browserBusy = false; }
+  } : undefined });
   try {
-    await initialize(client);
+    await initialize(client, writable);
     if (route.routed) {
       const catalog = [];
       let cursor = null;
@@ -315,16 +421,18 @@ export async function invokeCodex(request, settings, options = {}, signal, onEve
     const accountUsagePromise = client.request("account/usage/read", {}, telemetryOptions).catch(() => null);
     const rateLimitsPromise = client.request("account/rateLimits/read", {}, telemetryOptions).catch(() => null);
     const model = String(route.model || settings.codexModel || "").trim();
-    const effort = String(route.effort || settings.codexReasoningEffort || "").trim();
+    const effort = String(route.routed ? route.effort ?? "" : route.effort || settings.codexReasoningEffort || "").trim();
     const threadResult = await client.request("thread/start", {
       cwd: workingDirectory,
       approvalPolicy: "never",
       sandbox: writable ? "workspace-write" : "read-only",
       ephemeral: true,
+      ...(writable ? { dynamicTools: [BROWSER_VERIFY_TOOL] } : {}),
       ...(model ? { model } : {})
     });
     const threadId = threadResult?.thread?.id;
     if (!threadId) throw new Error("Codex thread/start 未返回 thread id。");
+    activeThreadId = threadId;
     await client.request("turn/start", {
       threadId,
       input: [{ type: "text", text: codexPrompt(request, workspace, options, writable) }],
@@ -333,7 +441,8 @@ export async function invokeCodex(request, settings, options = {}, signal, onEve
         ? { type: "workspaceWrite", writableRoots: [workspace], networkAccess: true }
         : { type: "readOnly", networkAccess: true },
       ...(model ? { model } : {}),
-      ...(effort ? { effort } : {})
+      ...(effort ? { effort } : {}),
+      ...(request.responseSchema ? { outputSchema: request.responseSchema } : {})
     });
 
     const finalMessages = [];
@@ -379,6 +488,7 @@ export async function invokeCodex(request, settings, options = {}, signal, onEve
       }
     }
   } finally {
+    browserLifetime.abort();
     client.close();
   }
 }

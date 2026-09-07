@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { normalizeCodexRoleModels } from "../public/smart-routing-config.js";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { dependencyStepIds } from "./workflow-context.js";
+import { WorkspaceCheckpoints } from "./workspace-checkpoints.js";
 
 export const SCHEMA_VERSION = 13;
 
@@ -120,6 +122,7 @@ export function defaultState(defaultWorkspace) {
       codexModel: "",
       codexReasoningEffort: "",
       smartRouting: false,
+      codexRoleModels: {},
       cardPolicy: "high-risk-only",
       cautionLevel: "medium"
     },
@@ -230,7 +233,7 @@ function normalizeProject(project, defaultWorkspace = "") {
     step.selectedDirectionOptionId = step.directionOptions.some((option) => option.id === step.selectedDirectionOptionId) ? step.selectedDirectionOptionId : null;
     step.directionSupplement = String(step.directionSupplement ?? "").trim().slice(0, 4_000);
     step.directionAnswer = String(step.directionAnswer ?? "").trim();
-    if (adaptive && step.kind === "decision" && step.requiresUserDirection && step.directionAnswer && ["ready", "error"].includes(step.status) && dependenciesApproved(project, step)) {
+    if (adaptive && !step.directionExecutionRequired && !step.reviewPending && step.kind === "decision" && step.requiresUserDirection && step.directionAnswer && ["ready", "error"].includes(step.status) && dependenciesApproved(project, step)) {
       step.status = "approved";
       step.lastError = null;
       step.result = humanDirectionDecisionResult(step);
@@ -290,6 +293,7 @@ export class StateStore {
     this.defaultWorkspace = defaultWorkspace;
     this.state = defaultState(defaultWorkspace);
     this.mutationQueue = Promise.resolve();
+    this.workspaceCheckpoints = new WorkspaceCheckpoints(path.join(path.dirname(filePath), "workspace-checkpoints"));
   }
 
   async load() {
@@ -322,7 +326,7 @@ export class StateStore {
     await rename(temporary, this.filePath);
   }
 
-  mutate(mutator) {
+  mutate(mutator, { onFailure = null } = {}) {
     const transaction = this.mutationQueue.then(async () => {
       const before = this.snapshot();
       try {
@@ -332,6 +336,7 @@ export class StateStore {
         return result;
       } catch (error) {
         restoreStateInPlace(this.state, before);
+        if (onFailure) await onFailure();
         throw error;
       }
     });
@@ -442,6 +447,7 @@ export class StateStore {
     const allowedEfforts = new Set(["off", "high", "max"]);
     await this.mutate((state) => {
       if (allowedRuntimes.has(input.agentRuntime)) state.settings.agentRuntime = input.agentRuntime;
+      if (Object.hasOwn(input, "codexRoleModels")) state.settings.codexRoleModels = normalizeCodexRoleModels(input.codexRoleModels);
       state.settings.dshPath = String(input.dshPath ?? "").trim();
       state.settings.workspace = String(input.workspace ?? "").trim() || this.defaultWorkspace;
       if (allowedModels.has(input.model)) state.settings.model = input.model;
@@ -488,42 +494,69 @@ export class StateStore {
     return this.restoreArchivedProject();
   }
 
-  async createCheckpoint(projectId, reason = "手动检查点", { stepId = null, kind = "manual", key = "" } = {}) {
-    await this.mutate(() => {
+  async createCheckpoint(projectId, reason = "手动检查点", { stepId = null, stepIds = stepId ? [stepId] : [], kind = "manual", key = "" } = {}) {
+    return this.mutate(async () => {
       const project = this.project(projectId);
       if (!project) throw new Error("项目不存在。");
       const checkpointKey = String(key ?? "").trim();
-      if (checkpointKey && project.checkpoints.some((checkpoint) => checkpoint.key === checkpointKey)) return;
-      project.checkpoints.push({
+      const existing = checkpointKey && project.checkpoints.find((checkpoint) => checkpoint.key === checkpointKey);
+      if (existing) return existing.id;
+      const workspaceSnapshot = await this.workspaceCheckpoints.capture(project.workspace);
+      const checkpoint = {
         id: randomUUID(),
         at: new Date().toISOString(),
         reason,
         stepId: stepId || null,
+        stepIds,
         kind: ["decision", "execution"].includes(kind) ? kind : "manual",
         key: checkpointKey,
+        workspaceSnapshot,
         snapshot: projectSnapshot(project)
-      });
+      };
+      project.checkpoints.push(checkpoint);
+      for (const step of project.steps.filter((step) => stepIds.includes(step.id))) step.rollbackCheckpointId = checkpoint.id;
       if (project.checkpoints.length > MAX_PROJECT_CHECKPOINTS) project.checkpoints.splice(0, project.checkpoints.length - MAX_PROJECT_CHECKPOINTS);
+      return checkpoint.id;
     });
   }
 
   async restoreCheckpoint(projectId, checkpointId = null) {
-    await this.mutate((state) => {
-      const index = state.projects.findIndex((project) => project.id === projectId);
-      if (index < 0) throw new Error("项目不存在。");
-      const project = state.projects[index];
-      const checkpoint = checkpointId
-        ? project.checkpoints.find((item) => item.id === checkpointId)
-        : project.checkpoints.at(-1);
-      if (!checkpoint) throw new Error("没有可恢复的检查点。");
-      const checkpoints = [...project.checkpoints];
-      const restored = normalizeProject({ ...structuredClone(checkpoint.snapshot), checkpoints }, this.defaultWorkspace);
-      restored.isPaused = true;
-      restored.pendingAction = null;
-      if (restored.executionRun?.status === "running") restored.executionRun = { ...restored.executionRun, status: "ready", error: null };
-      for (const step of restored.steps.filter((item) => item.status === "running")) step.status = "ready";
-      state.projects[index] = restored;
-    });
+    let files;
+    let disposable = false;
+    try {
+      await this.mutate(async (state) => {
+        const index = state.projects.findIndex((project) => project.id === projectId);
+        if (index < 0) throw new Error("项目不存在。");
+        const project = state.projects[index];
+        const checkpoint = checkpointId
+          ? project.checkpoints.find((item) => item.id === checkpointId)
+          : project.checkpoints.at(-1);
+        if (!checkpoint) throw new Error("没有可恢复的检查点。");
+        if (!checkpoint.workspaceSnapshot) throw new Error("此历史检查点没有文件快照，无法完整回退；请执行节点以建立新的检查点。");
+        files = await this.workspaceCheckpoints.restore(project.workspace, checkpoint.workspaceSnapshot);
+        const checkpoints = [...project.checkpoints];
+        const restored = normalizeProject({ ...structuredClone(checkpoint.snapshot), checkpoints }, this.defaultWorkspace);
+        restored.isPaused = true;
+        restored.pendingAction = null;
+        if (restored.executionRun?.status === "running") restored.executionRun = { ...restored.executionRun, status: "ready", error: null };
+        for (const step of restored.steps.filter((item) => item.status === "running")) step.status = "ready";
+        for (const step of restored.steps.filter((step) => (checkpoint.stepIds ?? [checkpoint.stepId]).includes(step.id))) step.rollbackCheckpointId = checkpoint.id;
+        state.projects[index] = restored;
+      }, { onFailure: async () => {
+        if (files) await files.rollback();
+        disposable = true;
+      } });
+      disposable = true;
+    } finally { if (files && disposable) await files.dispose(); }
+  }
+
+  async rollbackStep(projectId, stepId) {
+    const project = this.project(projectId);
+    const step = project?.steps.find((item) => item.id === stepId);
+    if (!step) throw new Error("步骤不存在。");
+    const checkpoint = project.checkpoints.find((item) => item.id === step.rollbackCheckpointId);
+    if (!checkpoint) throw new Error("此步骤没有可用的执行前文件检查点，无法完整回退。");
+    return this.restoreCheckpoint(projectId, checkpoint.id);
   }
 
   async restoreLatestCheckpoint(projectId) {
@@ -653,11 +686,12 @@ export function answerStepDirection(project, stepId, selection, supplemental = "
     step.directionSupplement = supplement;
     step.directionAnswer = normalized.slice(0, 8_000);
   }
-  if (step.kind === "decision" && dependenciesApproved(project, step)) {
+  if (step.kind === "decision" && !step.directionExecutionRequired && dependenciesApproved(project, step)) {
     step.status = "approved";
     step.lastError = null;
     step.result = humanDirectionDecisionResult(step);
   } else {
+    step.result = null;
     step.status = dependenciesApproved(project, step) ? "ready" : "locked";
   }
   project.updatedAt = new Date().toISOString();
@@ -745,7 +779,7 @@ export function rejectStep(project, stepId, feedback, targetSubprocessId = null)
   project.updatedAt = now;
 }
 
-export function reopenForRepair(project, stepId, feedback = "", targetSubprocessId = null, findings = []) {
+export function reopenForRepair(project, stepId, feedback = "", targetSubprocessId = null, findings = [], { preserveDirection = false } = {}) {
   const step = project.steps.find((item) => item.id === stepId);
   if (!step || (!["approved", "review"].includes(step.status) && !(step.status === "error" && step.reviewPending && step.result))) throw new Error("只有已通过或待审核步骤可以进入 Agent 返修。");
   const normalizedFindings = (Array.isArray(findings) ? findings : []).map((item) => ({
@@ -763,7 +797,7 @@ export function reopenForRepair(project, stepId, feedback = "", targetSubprocess
   step.lastError = null;
   step.lastFeedback = String(feedback).trim() || "用户重新打开已通过步骤。";
   step.repairFindings = normalizedFindings;
-  const resetsDirection = step.kind === "decision" && step.requiresUserDirection;
+  const resetsDirection = step.kind === "decision" && step.requiresUserDirection && !preserveDirection;
   if (resetsDirection) {
     step.selectedDirectionOptionId = null;
     step.directionSupplement = "";
@@ -799,43 +833,6 @@ export function reopenForRepair(project, stepId, feedback = "", targetSubprocess
 
 export function reopenStep(project, stepId, feedback = "", targetSubprocessId = null) {
   return reopenForRepair(project, stepId, feedback, targetSubprocessId);
-}
-
-export function rollbackStep(project, stepId) {
-  const step = project.steps.find((item) => item.id === stepId);
-  if (!step || step.status === "locked") throw new Error("当前步骤不能回退。");
-  step.revision += 1;
-  step.selectedOptionId = project.executionMode?.startsWith("adaptive") ? step.selectedOptionId : null;
-  step.result = null;
-  step.lastFeedback = project.executionMode?.startsWith("adaptive") ? "本节点执行状态已回退；工作目录文件需按结果中的回滚说明恢复。" : "本步骤已回退到未选择方案状态。";
-  step.status = dependenciesApproved(project, step) ? "ready" : "locked";
-  for (const [index, subprocess] of (step.subprocesses ?? []).entries()) {
-    subprocess.status = step.status === "ready" && index === 0 ? "ready" : "locked";
-    subprocess.selectedOptionId = null;
-    subprocess.result = null;
-    subprocess.lastError = null;
-  }
-  step.selectedSubprocessId = step.subprocesses?.[0]?.id ?? null;
-  markDescendantsStale(project, stepId);
-  if (project.executionMode?.startsWith("adaptive")) {
-    for (const descendantId of downstreamIds(project, stepId)) {
-      const descendant = project.steps.find((item) => item.id === descendantId);
-      if (!descendant) continue;
-      descendant.status = "locked";
-      descendant.result = null;
-      descendant.lastError = null;
-    }
-    project.artifact = null;
-    project.artifactStepId = null;
-    project.artifactSubprocessId = null;
-    project.phase = "workspace";
-    project.executionRun = { status: "ready", startedAt: null, completedAt: null, error: null, awaitingStepIds: [] };
-    project.pendingAction = null;
-    project.lastError = null;
-  }
-  appendContext(project, "correction", project.executionMode?.startsWith("adaptive") ? `回退「${step.title}」的执行状态；磁盘文件未自动恢复。` : `回退「${step.title}」到未选择方案状态。`, step.id, "用户");
-  appendLog(project, "revision", project.executionMode?.startsWith("adaptive") ? "回退节点执行状态" : "回退当前步骤", project.executionMode?.startsWith("adaptive") ? "目标、节点依赖和决策历史仍然保留；文件需按结果中的回滚说明恢复。" : "目标、计划和决策历史仍然保留。", step.id);
-  recomputeAvailability(project);
 }
 
 export function recoverInterruptedAdaptiveExecution(project) {

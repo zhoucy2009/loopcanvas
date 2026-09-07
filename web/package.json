@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node ./bin/loopcanvas.js",
     "test": "node --test",
-    "check": "node --check ./src/server.js && node --check ./src/remote.js && node --check ./src/agent-prompt.js && node --check ./src/harness.js && node --check ./src/codex.js && node --check ./src/artifact-validator.js && node --check ./src/diagnostics.js && node --check ./src/conversations.js && node --check ./src/plugins.js && node --check ./src/source-browser.js && node --check ./src/source-content.js && node --check ./src/geometry-edit.js && node --check ./public/learning-reference.js && node --check ./public/preview-trace.js && node --check ./public/voice-commands.js && node --check ./public/app-v2.js && node --check ./public/i18n.js && node --check ./public/translations.js",
+    "check": "node --check ./src/server.js && node --check ./src/workspace-checkpoints.js && node --check ./src/store.js && node --check ./src/remote.js && node --check ./src/agent-prompt.js && node --check ./src/harness.js && node --check ./src/codex.js && node --check ./src/artifact-validator.js && node --check ./src/diagnostics.js && node --check ./src/conversations.js && node --check ./src/plugins.js && node --check ./src/source-browser.js && node --check ./src/source-content.js && node --check ./src/geometry-edit.js && node --check ./public/learning-reference.js && node --check ./public/preview-trace.js && node --check ./public/voice-commands.js && node --check ./public/app-v2.js && node --check ./public/i18n.js && node --check ./public/translations.js && node --check ./src/workflow-library.js && node --check ./src/workflow-api.js && node --check ./src/workflow-tools.js && node --check ./public/workflow-model.js && node --check ./public/workflow-library-ui.js",
     "prepack": "node -e \"const{cpSync,rmSync}=require('node:fs');rmSync('plugins',{recursive:true,force:true});cpSync('../plugins','plugins',{recursive:true});\"",
     "postpack": "node -e \"require('node:fs').rmSync('plugins',{recursive:true,force:true});\""
   },
@@ -29,6 +29,8 @@
     "access": "public"
   },
   "dependencies": {
+    "pdf-lib": "1.17.1",
+    "playwright-core": "1.63.0",
     "qrcode": "1.5.4"
   },
   "repository": {

@@ -158,3 +158,25 @@ Bridge/attachments/
 
 # Keep shareable environment templates, never real environment files
 !.env.*.example
+
+# Credentials and local agent/runtime output must never be published
+.codex/
+.ssh/
+.aws/
+.npmrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+credentials.json
+auth.json
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+.loopcanvas-browser/
+workflow-runs/
+__pycache__/
+*.pyc

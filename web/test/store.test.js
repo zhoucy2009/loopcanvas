@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  analyzeDirectives, answerStepDirection, approveStep, applyAdaptiveRoute, applyPlan, executionReadiness, moveStep, readyAdaptiveSteps, recoverInterruptedAdaptiveExecution, rejectStep, reopenForRepair, reopenStep, rollbackStep, SCHEMA_VERSION, setStepCaution, StateStore
+  analyzeDirectives, answerStepDirection, approveStep, applyAdaptiveRoute, applyPlan, executionReadiness, moveStep, readyAdaptiveSteps, recoverInterruptedAdaptiveExecution, rejectStep, reopenForRepair, reopenStep, SCHEMA_VERSION, setStepCaution, StateStore
 } from "../src/store.js";
 
 test("并发 mutate 串行保存且失败事务不会让旧项目引用失效", async () => {
@@ -275,23 +275,6 @@ test("已回答却执行失败的旧 decision 节点在加载时直接完成", a
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-});
-
-test("自适应节点回退会重新锁定下游并清除旧交付登记", () => {
-  const project = { workspace: "/tmp/adaptive", phase: "complete", updatedAt: "", context: [], decisionLog: [], agents: [], steps: [], artifact: { filename: "index.html" } };
-  applyAdaptiveRoute(project, {
-    executionShape: "graph", assistantMessage: "图", primaryArtifact: { title: "页面", kind: "html", filename: "index.html", entrypoint: "index.html", acceptanceCriteria: ["可打开"] },
-    steps: [{ id: "one", title: "一", dependencies: [] }, { id: "two", title: "二", dependencies: ["one"] }]
-  });
-  project.steps[0].status = "approved"; project.steps[0].result = { summary: "一" };
-  project.steps[1].status = "approved"; project.steps[1].result = { summary: "二" };
-  project.artifact = { filename: "index.html" }; project.phase = "complete";
-  rollbackStep(project, "one");
-  assert.equal(project.steps[0].status, "ready");
-  assert.equal(project.steps[1].status, "locked");
-  assert.equal(project.steps[1].result, null);
-  assert.equal(project.artifact, null);
-  assert.equal(project.executionRun.status, "ready");
 });
 
 test("重新加载会把没有活动调用的自适应执行中节点恢复为待执行", async () => {

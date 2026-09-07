@@ -43,3 +43,16 @@ test("ensureProjectDocuments leaves unrelated user documents untouched", async (
 
   assert.equal(await readFile(path.join(workspace, "AGENTS.md"), "utf8"), custom);
 });
+
+test("generated directory rules permit host browser temporary files without replacing custom limits", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-browser-rules-"));
+  await writeFile(path.join(workspace, "AGENTS.md"), "# AGENTS.md — 项目\n- 所有文件创建、编辑与命令执行必须位于本项目工作目录内。\n- 不得访问生产数据库。\n");
+  await writeFile(path.join(workspace, "宪法.md"), "# 项目宪法（不可违反的底线规则）\n3. 目录边界：不得在本项目工作目录之外创建、修改文件或执行命令。\n4. 不允许联网。\n");
+  await ensureProjectDocuments({ workspace });
+  assert.match(await readFile(path.join(workspace, "AGENTS.md"), "utf8"), /宿主管理的隔离浏览器.*不得访问生产数据库/s);
+  assert.match(await readFile(path.join(workspace, "宪法.md"), "utf8"), /专用临时目录.*不允许联网/s);
+  const custom = "# 项目宪法（不可违反的底线规则）\n3. 目录边界：只能写入 output 子目录。\n";
+  await writeFile(path.join(workspace, "宪法.md"), custom);
+  await ensureProjectDocuments({ workspace });
+  assert.equal(await readFile(path.join(workspace, "宪法.md"), "utf8"), custom);
+});

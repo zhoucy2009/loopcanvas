@@ -75,7 +75,7 @@ Dependencies determine execution order. Independent nodes with non-conflicting w
 
 Reopen or roll back a specific node, revisit a checkpoint, retry a failed execution, or retry only its independent review while retaining an already generated result. Downstream workflow state is reopened when an upstream decision changes. Checkpoints remain reusable: restoring one does not consume it or generate another rollback checkpoint.
 
-**Rollback restores LoopCanvas workflow state. It does not automatically restore files already written to disk.** Use the recorded rollback instructions or your version-control system for file recovery. Up to 40 checkpoints are retained per project.
+**Rollback restores both files and workflow state to the existing pre-execution checkpoint using an isolated Git worktree.** It restores modified, deleted, untracked and ignored files and removes later additions, while preserving the original repository’s Git metadata. Parallel batches and legacy continuous builds restore as a whole. Historical checkpoints without file snapshots cannot be fully restored. Git is required; up to 40 checkpoints are retained per project.
 
 ### A live preview beside the workflow
 

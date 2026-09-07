@@ -11,6 +11,8 @@ function taskBoundary(kind, request = {}) {
     }
     return "本次只做规划。返回一至十二个 Harness 真正需要的执行节点与依赖；即使任务可一步完成，也只返回单节点 Graph，不实现、不验证交付、不修改文件。不得为了展示流程人为拆步。";
   }
+  if (kind === "custom_workflow_execute") return "只执行 request.node 指定的工具调用或输出任务；将结果和状态补丁返回调度器，不自行推进其他节点。";
+  if (kind === "custom_workflow_generate") return "仅生成可审阅的工具调用节点。本次不得实际执行工具调用或修改文件。";
   if (kind === "execute_project") {
     return "连续完成 request.selectedPlan 中的全部里程碑，并持续维护唯一主交付物；里程碑是同一次执行的检查点，不得在每个节点停下等待再次派发。";
   }

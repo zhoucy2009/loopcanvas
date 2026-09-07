@@ -161,8 +161,15 @@ export function createRuntimePreviewManager({ startupTimeoutMs = 30_000, spawnPr
   async function stop(projectId) {
     const runtime = runtimes.get(projectId);
     if (!runtime) return;
+    if (!runtime.exited) await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        runtime.child.kill("SIGKILL");
+        reject(new Error("预览进程尚未退出，请稍后重试回退。"));
+      }, 3000);
+      runtime.child.once("exit", () => { clearTimeout(timer); resolve(); });
+      runtime.child.kill("SIGTERM");
+    });
     runtimes.delete(projectId);
-    if (!runtime.exited) runtime.child.kill("SIGTERM");
   }
 
   async function start(project) {
@@ -204,6 +211,7 @@ export function createRuntimePreviewManager({ startupTimeoutMs = 30_000, spawnPr
   }
 
   return {
+    stop,
     async proxy(project, request, response) {
       const runtime = await start(project);
       return proxyRequest(runtime, request, response);

@@ -6,6 +6,8 @@
  * Sol/Terra/Luna route was used.
  */
 
+import { codexRoleProfile, executorProfileKey } from "../public/smart-routing-config.js";
+
 const CODEX_MODELS = Object.freeze({
   sol: "gpt-5.6-sol",
   terra: "gpt-5.6-terra",
@@ -44,8 +46,8 @@ export function roleForRequest(request = {}) {
 }
 
 const ROLE_KINDS = Object.freeze({
-  planner: new Set(["route_project"]),
-  executor: new Set(["execute_step", "execute_project"]),
+  planner: new Set(["route_project", "custom_workflow_generate"]),
+  executor: new Set(["execute_step", "execute_project", "custom_workflow_execute"]),
   learning: new Set(["learning_follow_up", "learning_explain_document", "learning_explain_selection", "learning_repository_document_overviews"]),
   search: new Set(["trusted_public_research", "visual_art_research"]),
   reviewer: new Set(["review_step"]),
@@ -65,26 +67,20 @@ function configuredPlannerEffort(settings, request) {
   return PLANNER_EFFORTS.has(String(configured ?? "")) ? String(configured) : "high";
 }
 
-function executorRoute(request) {
+function executorRoute(request, settings) {
   const step = request.currentStep ?? request.step ?? {};
-  const risk = String(step.riskLevel ?? request.riskLevel ?? "L1").toUpperCase();
-  const kind = String(step.kind ?? request.stepKind ?? "build").toLowerCase();
-  if (["L2", "L3"].includes(risk) || ["verify", "judge"].includes(kind)) {
-    return { model: CODEX_MODELS.sol, effort: "low", selection: "risk-or-verification" };
-  }
-  if (["integrate", "deliver"].includes(kind)) {
-    return { model: CODEX_MODELS.terra, effort: "high", selection: "integration-or-delivery" };
-  }
-  return { model: CODEX_MODELS.luna, effort: "high", selection: "low-risk-build" };
+  const key = executorProfileKey({ riskLevel: step.riskLevel ?? request.riskLevel, kind: step.kind ?? request.stepKind });
+  const selection = { executorVerify: "risk-or-verification", executorIntegrate: "integration-or-delivery", executorBuild: "low-risk-build" }[key];
+  return { ...codexRoleProfile(key, settings), selection };
 }
 
 function codexRoute(request, settings, role = roleForRequest(request)) {
-  if (role === "planner") return { model: CODEX_MODELS.sol, effort: configuredPlannerEffort(settings, request), selection: "planner" };
-  if (["learning", "search"].includes(role)) return { model: CODEX_MODELS.luna, effort: "low", selection: role };
-  if (role === "executor") return executorRoute(request);
-  if (role === "reviewer") return { model: CODEX_MODELS.sol, effort: "high", selection: "reviewer" };
-  if (role === "judge") return { model: CODEX_MODELS.sol, effort: "xhigh", selection: "judge" };
-  if (role === "tracer") return { model: CODEX_MODELS.sol, effort: "low", selection: "tracer" };
+  if (role === "executor") return executorRoute(request, settings);
+  const profile = codexRoleProfile(role, settings);
+  if (profile) {
+    if (role === "planner" && !settings.codexRoleModels?.planner) profile.effort = configuredPlannerEffort(settings, request);
+    return { ...profile, selection: role };
+  }
   return null;
 }
 
@@ -120,7 +116,7 @@ export function resolveModelRoute(request = {}, settings = {}) {
     requestedEffort: codex.effort,
     routed: true,
     available: false,
-    fallbackReason: "当前执行引擎是 DeepSeek Harness；Sol/Terra/Luna 角色模型仅可由 Codex App Server 提供。"
+    fallbackReason: "当前执行引擎是 DeepSeek Harness；智能路由角色模型仅可由 Codex App Server 提供。"
   };
 }
 

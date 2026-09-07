@@ -113,7 +113,7 @@ export function parseVoiceCommand(transcript) {
 }
 
 export function voiceLocalOperationLabel(type) {
-  if (type === "rollback") return "无 · 仅回退本机编排状态";
+  if (type === "rollback") return "Git worktree · 恢复本机文件与工作流";
   if (type === "pause") return "无 · 仅暂停/生成交接状态";
   return "";
 }

@@ -1,3 +1,5 @@
+import { WorkflowLibraryUI } from "./workflow-library-ui.js";
+import { CODEX_ROLE_PROFILES, codexRoleProfile, executorProfileKey, validateCodexRoleCatalog } from "./smart-routing-config.js";
 import { t, ui, getLanguage, setLanguage, localizeStatic } from "./i18n.js";
 import { githubRepositoryURL } from "./learning-reference.js";
 import { parseVoiceCommand, voiceLocalOperationLabel } from "./voice-commands.js";
@@ -52,6 +54,7 @@ function explorationScope() { return explorationUseProject ? activeProject()?.id
 function activeExplorationPage() { return explorationPages.active(explorationScope()); }
 function newExplorationPage(kind = activeExplorationPage().kind) { return explorationPages.open(explorationScope(), kind); }
 let codexModels = [];
+let codexRoleDraft = {};
 let codexModelsStatus = "idle";
 let codexModelsError = "";
 let executionBlock = null;
@@ -140,11 +143,18 @@ async function api(route, options = {}) {
   if (operation?.role === "plan") agentSprites.handoff(operation.projectId);
   const finishSprite = operation ? agentSprites.begin(operation.role, operation.projectId) : () => {};
   const request = (async () => {
-    const response = await fetch(route, {
+    const send = () => fetch(route, {
       ...options,
       headers: { "Content-Type": "application/json", ...(session?.token ? { "X-LoopCanvas-Token": session.token } : {}), ...(options.headers ?? {}) }
     });
-    const payload = await response.json().catch(() => ({}));
+    let response = await send();
+    let payload = await response.json().catch(() => ({}));
+    // This rejection occurs before dispatch. Never retry a network error or an
+    // arbitrary 403: the first mutation may already have had external effects.
+    if (response.status === 403 && payload.code === "SESSION_TOKEN_EXPIRED") {
+      const refreshed = await fetch("/api/bootstrap").then((r) => r.ok ? r.json() : null);
+      if (refreshed?.token && session) { session.token = refreshed.token; response = await send(); payload = await response.json().catch(() => ({})); }
+    }
     if (!response.ok) throw new Error(payload.error || ui`请求失败（${response.status}）`);
     if (navigation && navigationRequest === navigationRevision) payload.navigationRequest = navigationRequest;
     if (payload.state) payload.state = reconcileProjectState(session?.state, payload.state, { activate: payload.navigationRequest === navigationRevision });
@@ -180,11 +190,11 @@ function routeDisplayLabel(route, fallback = t("等待 Agent")) {
 function executorAgentPreview(step) {
   const settings = session?.state?.settings ?? {};
   if (settings.smartRouting === false || settings.agentRuntime !== "codex") return activeAgentLabel();
-  const risk = String(step?.riskLevel || "L1").toUpperCase();
-  const kind = String(step?.kind || "build").toLowerCase();
-  if (["L2", "L3"].includes(risk) || kind === "verify") return "gpt-5.6-sol · low";
-  if (["integrate", "deliver"].includes(kind)) return "gpt-5.6-terra · high";
-  return "gpt-5.6-luna · high";
+  return configuredRoleLabel(executorProfileKey(step));
+}
+function configuredRoleLabel(key) {
+  const profile = codexRoleProfile(key, session?.state?.settings);
+  return profile ? `${profile.model} · ${profile.effort || t("由模型决定")}` : activeAgentLabel();
 }
 function stepStatus(status) { return ({ locked: t("需前置"), ready: t("可执行"), running: t("执行中"), review: t("待验收"), approved: t("已通过"), stale: t("需复核"), error: t("出错") })[status] ?? status; }
 function subprocessStatus(status) { return ({ locked: t("需前置"), ready: t("可执行"), running: t("执行中"), review: t("待验收"), approved: t("已通过"), error: t("出错") })[status] ?? status; }
@@ -232,7 +242,7 @@ function renderVoicePanel() {
   const smart = session?.state?.settings?.smartRouting !== false && session?.state?.settings?.agentRuntime === "codex";
   const manual = activeAgentLabel();
   const routeLabels = smart
-    ? { plan: "Sol · high", execute: "Luna / Terra / Sol", review: "Sol · high", judge: "Sol · xhigh" }
+    ? { plan: configuredRoleLabel("planner"), execute: t("按节点选择"), review: configuredRoleLabel("reviewer"), judge: configuredRoleLabel("judge") }
     : { plan: manual, execute: manual, review: manual, judge: manual };
   for (const node of document.querySelectorAll("[data-voice-route]")) node.textContent = routeLabels[node.dataset.voiceRoute] || t("等待路由");
   $("#voice-route-guide-title").textContent = smart ? t("当前智能路由") : t("当前手动 Agent");
@@ -271,12 +281,12 @@ function focusVoiceDestination(selector, value = "") {
 }
 
 const voiceAgentRoutes = () => ({
-  plan: { feature: t("智能规划"), agent: t("规划者 · Sol high") },
-  execute_step: { feature: t("定点执行"), agent: t("执行者 · 按节点路由；完成后 Sol high 审核") },
-  step_review: { feature: t("步骤审核"), agent: t("审核者 · Sol high") },
-  final_review: { feature: t("最终审核"), agent: t("裁决者 · Sol xhigh") },
-  search: { feature: t("联网搜索"), agent: t("搜索者 · Luna light") },
-  learning: { feature: t("代码学习"), agent: t("讲解者 · Luna light") }
+  plan: { feature: t("智能规划"), agent: configuredRoleLabel("planner") },
+  execute_step: { feature: t("定点执行"), agent: t("执行者 · 按节点路由") },
+  step_review: { feature: t("步骤审核"), agent: configuredRoleLabel("reviewer") },
+  final_review: { feature: t("最终审核"), agent: configuredRoleLabel("judge") },
+  search: { feature: t("联网搜索"), agent: configuredRoleLabel("search") },
+  learning: { feature: t("代码学习"), agent: configuredRoleLabel("learning") }
 });
 
 function announceVoiceRoute(command, suffix = "") {
@@ -308,6 +318,7 @@ async function startVoicePlan(command) {
   saveAppMode();
   render();
   if (!typed) throw new Error(t("请在“帮我策划”后说出目标，或先在目标框中输入需求。"));
+  if (await workflowLibraryUI.triggerPrompt(typed)) return;
   let project = current;
   if (!project) {
     const created = await api("/api/projects", { method: "POST", body: JSON.stringify({ goal: typed, attachmentIds: session.state.draftAttachments.map((item) => item.id) }) });
@@ -319,7 +330,7 @@ async function startVoicePlan(command) {
   try {
     updateFromPayload(await api(`/api/projects/${project.id}/plan`, { method: "POST", body: JSON.stringify({ goal: typed, attachmentIds: session.state.draftAttachments.map((item) => item.id) }) }));
   } finally { setBusy(false); }
-  setVoiceState("success", t("智能规划已完成"), ui`${routeDisplayLabel(activeProject()?.planningRoute, t("规划者 · Sol high"))}；执行节点已准备`, command.transcript);
+  setVoiceState("success", t("智能规划已完成"), ui`${routeDisplayLabel(activeProject()?.planningRoute, configuredRoleLabel("planner"))}；执行节点已准备`, command.transcript);
 }
 
 function drainVoiceCommands() {
@@ -457,7 +468,7 @@ async function routeVoiceCommand(transcript, { confirmed = false, preparedComman
       selectedStepId = step.id;
       render();
       const reviewed = activeProject()?.steps.find((item) => item.id === step.id)?.agentReview;
-      setVoiceState("success", ui`第 ${number} 步审核完成`, `${routeDisplayLabel(reviewed?.route, t("审核者 · Sol high"))} · ${reviewed?.verdict === "pass" ? t("通过") : t("需要返修")}`, command.transcript);
+      setVoiceState("success", ui`第 ${number} 步审核完成`, `${routeDisplayLabel(reviewed?.route, configuredRoleLabel("reviewer"))} · ${reviewed?.verdict === "pass" ? t("通过") : t("需要返修")}`, command.transcript);
       if (reviewed?.verdict === "pass") queueAutomaticWorkflow(project.id);
       return;
     }
@@ -467,7 +478,7 @@ async function routeVoiceCommand(transcript, { confirmed = false, preparedComman
       announceVoiceRoute(command);
       updateFromPayload(await api(`/api/projects/${project.id}/final-review`, { method: "POST", body: "{}" }));
       const verdict = activeProject()?.finalReview?.verdict;
-      setVoiceState("success", t("最终审核完成"), `${routeDisplayLabel(activeProject()?.finalReview?.route, t("裁决者 · Sol xhigh"))} · ${verdict === "pass" ? t("通过") : t("需要返修")}`, command.transcript);
+      setVoiceState("success", t("最终审核完成"), `${routeDisplayLabel(activeProject()?.finalReview?.route, configuredRoleLabel("judge"))} · ${verdict === "pass" ? t("通过") : t("需要返修")}`, command.transcript);
       return;
     }
     if (command.type === "search") {
@@ -516,8 +527,8 @@ async function routeVoiceCommand(transcript, { confirmed = false, preparedComman
       saveAppMode();
       render();
       updateFromPayload(await api(`/api/projects/${project.id}/steps/${step.id}/rollback`, { method: "POST", body: "{}" }));
-      setVoiceState("success", ui`已回退到第 ${command.stepNumber} 步`, ui`${step.title}；工作目录文件未自动恢复`, command.transcript);
-      showToast(ui`已回退第 ${command.stepNumber} 步“${step.title}”；工作目录文件没有自动恢复。`);
+      setVoiceState("success", ui`已回退到第 ${command.stepNumber} 步`, ui`${step.title}；文件与工作流已恢复到执行前`, command.transcript);
+      showToast(ui`已回退第 ${command.stepNumber} 步“${step.title}”；文件与工作流已恢复到执行前。`);
       return;
     }
     if (command.type === "preview") {
@@ -1109,6 +1120,7 @@ function renderSidebar() {
 
 function renderHarness() {
   const runtime = session.state.settings.agentRuntime === "codex" ? "codex" : "dsh";
+  agentSprites.setHarness(runtime);
   const active = session.installation?.[runtime];
   const detected = [session.installation?.dsh, session.installation?.codex].filter((agent) => agent?.found).length;
   const pill = $("#harness-pill");
@@ -1123,19 +1135,20 @@ function attachmentChips(items, removable = false) {
 }
 
 function intakeTemplate(project = null) {
-  const hasFixedGoal = Boolean(project?.goal);
+  const planningFailed = Boolean(project?.lastError && ["plan", "route_project"].includes(project.pendingAction?.type));
+  const hasFixedGoal = Boolean(project?.goal) && !planningFailed;
   const fixedAttachments = project?.attachments ?? [];
   const draftAttachments = session.state.draftAttachments;
   return ui`<section class="intake"><div class="intake-card">
     <div class="eyebrow">START WITH AN OUTCOME</div>
     <h2>${project ? t("确认目标并立即开始") : t("今天想完成什么？")}</h2>
-    <p>Sol 规划者先生成只读执行路线；每个节点由智能路由选择执行 Agent，并由独立 Sol 审核后再推进。</p>
-    ${project?.lastError ? ui`<div class="card error-card">上次规划失败：${escapeHTML(project.lastError)}${["plan", "route_project"].includes(project.pendingAction?.type) ? t(`<div><button id="retry-plan" class="secondary compact">重新发送规划请求</button></div>`) : ""}</div>` : ""}
-    <textarea id="goal-input" class="goal-input" placeholder="描述目标、约束、已有材料和你最在意的结果……" ${hasFixedGoal ? "readonly" : ""}>${escapeHTML(hasFixedGoal ? project.goal : projectDrafts.get(project?.id, "goal", ""))}</textarea>
+    <p>规划者先生成只读执行路线；每个节点使用配置的执行模型，并由独立审核者检查后再推进。</p>
+    ${project?.lastError ? ui`<div class="card error-card">上次规划失败：${escapeHTML(project.lastError)}${planningFailed ? t("<p class=\"replan-hint\">你可以在下方修改原始需求，再重新规划；系统将以更新后的内容替换本次失败的需求。</p>") : ""}</div>` : ""}
+    <textarea id="goal-input" class="goal-input" placeholder="描述目标、约束、已有材料和你最在意的结果……" ${hasFixedGoal ? "readonly" : ""}>${escapeHTML(project?.goal ?? projectDrafts.get(project?.id, "goal", ""))}</textarea>
     ${attachmentChips(fixedAttachments)}${attachmentChips(draftAttachments, true)}${executionReferenceChips(project?.executionReferences, true)}
     <div class="intake-actions"><span class="safe-note">单文件 25 MiB · 单批 100 MiB · 全部保存在本机</span><div class="intake-action-group">
       <button id="attach-files" class="secondary">附件</button><button id="text-to-file" class="ghost">长文本转附件</button>
-      <button id="submit-goal" class="primary">${project ? t("开始执行") : t("创建并执行")}</button>
+      <button id="submit-goal" class="primary">${planningFailed ? t("按修改后的需求重新规划") : project ? t("开始执行") : t("创建并执行")}</button>
     </div></div>
   </div></section>`;
 }
@@ -1316,13 +1329,14 @@ function adaptiveGraphTemplate(project, steps) {
         <p>${escapeHTML(step.purpose)}</p>
         <dl class="node-meta"><div><dt>依赖</dt><dd>${escapeHTML(dependencies.join("、") || t("无"))}</dd></div><div><dt>并行</dt><dd>${step.parallelSafe ? t("可并行") : t("保持串行")}</dd></div><div><dt>执行 Agent</dt><dd data-node-executor>${escapeHTML(executorLabel)}</dd></div><div><dt>审核 Agent</dt><dd>${escapeHTML(reviewLabel)}</dd></div><div><dt>写入范围</dt><dd>${escapeHTML((step.writeScope ?? []).join("、") || t("只读或未声明"))}</dd></div></dl>
         <label class="node-caution">谨慎等级<select data-step-caution="${escapeHTML(step.id)}"><option value="inherit" ${step.cautionLevel ? "" : "selected"}>继承全局（${escapeHTML(cautionLabel(session.state.settings.cautionLevel))}）</option><option value="low" ${step.cautionLevel === "low" ? "selected" : ""}>快速</option><option value="medium" ${step.cautionLevel === "medium" ? "selected" : ""}>标准</option><option value="high" ${step.cautionLevel === "high" ? "selected" : ""}>谨慎</option></select></label>
+        ${step.status !== "approved" && step.lastFeedback ? `<div class="node-error" role="status"><p>${escapeHTML(step.lastFeedback)}</p></div>` : ""}
         ${needsDirection ? directionRequestTemplate(project, step) : step.directionAnswer ? ui`<div class="direction-answer"><span>已确认方向</span><p>${escapeHTML(step.directionAnswer)}</p></div>` : ""}
         ${actuallyRunning ? `<div class="node-running"><span class="spinner" aria-hidden="true"></span><strong data-node-activity>${escapeHTML(runtimeActivityText(live))}</strong></div>` : ""}
         ${interrupted ? t(`<div class="node-error" role="status"><strong>上次执行已中断</strong><p>服务端没有检测到这个节点的活动 Agent 调用，可以重新执行。</p></div>`) : ""}
         ${step.status === "error" ? `<div class="node-error" role="alert"><strong>${step.reviewPending ? t("执行结果已保留，等待独立审核") : t("节点未通过")}</strong><p>${escapeHTML(step.lastError || project.lastError || t("Agent 没有返回可用结果。"))}</p>${step.reviewPending ? ui`<button class="secondary compact" data-retry-agent-review="${escapeHTML(step.id)}">只重试审核，不重新执行</button>` : ""}</div>` : ""}
-        ${displayStatus === "error" ? ui`<div class="node-execution-actions"><button data-adaptive-run="sequential" data-adaptive-run-step="${escapeHTML(step.id)}" class="secondary compact">重试此节点</button><button data-adaptive-rollback="${escapeHTML(step.id)}" class="ghost compact">${step.requiresUserDirection ? t("重新选择方向") : t("回退节点状态")}</button></div>` : displayStatus === "ready" && !needsDirection ? ui`<div class="node-execution-actions"><button data-adaptive-run="sequential" data-adaptive-run-step="${escapeHTML(step.id)}" class="primary compact">执行此节点</button></div>` : ""}
+        ${displayStatus === "error" ? ui`<div class="node-execution-actions"><button data-adaptive-run="sequential" data-adaptive-run-step="${escapeHTML(step.id)}" class="secondary compact">重试此节点</button><button data-adaptive-rollback="${escapeHTML(step.id)}" class="ghost compact">${step.requiresUserDirection ? t("重新选择方向") : t("恢复执行前状态")}</button></div>` : displayStatus === "ready" && !needsDirection ? ui`<div class="node-execution-actions"><button data-adaptive-run="sequential" data-adaptive-run-step="${escapeHTML(step.id)}" class="primary compact">执行此节点</button></div>` : ""}
         ${step.result ? ui`<div class="node-result"><strong>${step.status === "error" ? t("Agent 返回的失败结果：") : ""}${escapeHTML(step.result.summary)}</strong><details ${step.status === "error" ? "open" : ""}><summary>证据、阻断问题与回滚</summary>${resultDetails(step.result)}</details>${step.kind === "verify" && ["error", "review"].includes(step.status) && step.result.verificationPassed === false ? ui`<button class="secondary compact" data-verification-repair="${escapeHTML(step.id)}">返回上游修复</button>` : ""}</div>` : ""}
-        <footer><span>${escapeHTML(cautionLabel(level))}</span>${["approved", "stale"].includes(displayStatus) ? ui`<button data-adaptive-rollback="${escapeHTML(step.id)}" class="ghost compact">回退节点状态</button>` : ""}</footer>
+        <footer><span>${escapeHTML(cautionLabel(level))}</span>${["approved", "stale"].includes(displayStatus) ? ui`<button data-adaptive-rollback="${escapeHTML(step.id)}" class="ghost compact">恢复执行前状态</button>` : ""}</footer>
       </article>`;
     }).join("")}</div></section>`;
 }
@@ -1786,13 +1800,25 @@ function explorationTemplate(project) {
 
 function renderModeSwitch() {
   document.querySelectorAll("[data-app-mode]").forEach((button) => {
-    const active = workspaceView === "mode" && button.dataset.appMode === appMode;
+    const active = (workspaceView === "mode" || workspaceView === "workflow-execution") && button.dataset.appMode === appMode;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
 }
 
+const workflowLibraryUI = new WorkflowLibraryUI({ api, toast: showToast, open: (view = "library") => { workspaceView = view === "execution" ? "workflow-execution" : "workflow-library"; appMode = "workflow"; render(); } });
+$("#open-workflow-library").addEventListener("click", () => workflowLibraryUI.showLibrary());
+for (const target of document.querySelectorAll('[data-app-mode="workflow"]')) {
+  target.addEventListener("dragover", (event) => { if (event.dataTransfer.types.includes("application/x-loopcanvas-workflow")) event.preventDefault(); });
+  target.addEventListener("drop", async (event) => {
+    const id = event.dataTransfer.getData("application/x-loopcanvas-workflow"); if (!id) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    try { await workflowLibraryUI.prepareRun(id, "drag"); } catch (error) { showToast(error.message, true); }
+  }, true);
+}
+
 function renderWorkspace() {
+  if (["workflow-library", "workflow-execution"].includes(workspaceView)) { $("#page-title").textContent = workspaceView === "workflow-execution" ? "执行 · 工作流需求" : "工作流库"; workflowLibraryUI.mount($("#workspace")); renderModeSwitch(); return; }
   // Capture against the DOM's owner, never the newly selected project.
   document.querySelectorAll("[data-project-draft]").forEach((input) => {
     if (!input.readOnly) projectDrafts.set(input.dataset.draftProject, input.dataset.projectDraft, input.value);
@@ -1870,7 +1896,7 @@ function renderInstallationGuide() {
     ${agentRow("DeepSeek Harness (dsh)", settings.agentRuntime === "codex" ? t("可选执行引擎") : t("当前执行引擎"), installation?.dsh)}
     ${agentRow("Codex App Server", settings.agentRuntime === "codex" ? t("当前执行引擎") : t("可选执行引擎"), installation?.codex)}
     ${installation?.dsh?.found ? "" : t(`<div class="agent-install-help">未找到 dsh 时，可由你本人在终端运行：<code>npx @deepseek-ai/dsh web</code><button type="button" id="copy-install-command" class="ghost compact">复制命令</button></div>`)}
-    <small>首次加载只发现本机路径；点击“检测本机 Agents”后再验证版本与能力。Node.js ${escapeHTML(installation?.node?.version ?? t("未知"))}</small>
+    <small>自动比较本机 Codex 版本；点击“检测本机 Agents”验证运行能力。Node.js ${escapeHTML(installation?.node?.version ?? t("未知"))}</small>
   </div>`;
 }
 
@@ -1886,6 +1912,51 @@ function renderCodexEfforts(preferred = "") {
   effort.value = options.some((item) => item.reasoningEffort === selected) ? selected : model?.defaultReasoningEffort || options[0]?.reasoningEffort || "";
 }
 
+function renderCodexRoleEffort(key) {
+  const profile = codexRoleProfile(key, { codexRoleModels: codexRoleDraft });
+  const model = codexModels.find(item => item.model === profile.model);
+  const efforts = model?.supportedReasoningEfforts ?? [];
+  const control = document.getElementById(`role-effort-${key}`);
+  control.innerHTML = efforts.length
+    ? efforts.map(item => `<option value="${escapeHTML(item.reasoningEffort)}">${escapeHTML(item.reasoningEffort)}</option>`).join("")
+    : `<option value="">${t("由模型决定")}</option>`;
+  if (profile.effort && !efforts.some(item => item.reasoningEffort === profile.effort)) control.insertAdjacentHTML("afterbegin", `<option value="${escapeHTML(profile.effort)}">${escapeHTML(profile.effort)} · ${t("不可用")}</option>`);
+  control.value = profile.effort;
+  control.disabled = !model || !efforts.length;
+}
+
+function updateRoleSettingsValidity() {
+  const codex = $("#setting-runtime").value === "codex";
+  const smart = $("#setting-smart-routing").checked;
+  let error = "";
+  if (codex && smart && codexModelsStatus === "ready") {
+    try { validateCodexRoleCatalog(codexRoleDraft, codexModels); }
+    catch (failure) { error = failure.message; }
+  }
+  $("#codex-role-settings").disabled = !smart || codexModelsStatus !== "ready";
+  $("#codex-role-status").textContent = error;
+  $("#codex-role-status").classList.toggle("error", Boolean(error));
+  $("#save-settings").disabled = codex && (codexModelsStatus !== "ready" || !$("#setting-codex-model").value || Boolean(error));
+}
+
+function renderCodexRoleSettings() {
+  const row = ([key, definition]) => {
+    const label = t(definition.label);
+    const profile = codexRoleProfile(key, { codexRoleModels: codexRoleDraft });
+    const available = codexModels.some(item => item.model === profile.model);
+    const options = codexModels.map(item => `<option value="${escapeHTML(item.model)}">${escapeHTML(item.displayName)}</option>`).join("");
+    return `<div class="codex-role-row"><strong>${escapeHTML(label)}</strong><select id="role-model-${key}" data-role-model="${key}" aria-label="${escapeHTML(`${label} · ${t("模型")}`)}">${available ? "" : `<option value="${escapeHTML(profile.model)}">${escapeHTML(profile.model)} · ${t("不可用")}</option>`}${options}</select><select id="role-effort-${key}" data-role-effort="${key}" aria-label="${escapeHTML(`${label} · ${t("推理强度")}`)}"></select></div>`;
+  };
+  const entries = Object.entries(CODEX_ROLE_PROFILES);
+  $("#codex-primary-roles").innerHTML = entries.filter(([key]) => !key.startsWith("executor") && key !== "tracer").map(row).join("");
+  $("#codex-execution-roles").innerHTML = entries.filter(([key]) => key.startsWith("executor") || key === "tracer").map(row).join("");
+  for (const [key] of entries) {
+    document.getElementById(`role-model-${key}`).value = codexRoleProfile(key, { codexRoleModels: codexRoleDraft }).model;
+    renderCodexRoleEffort(key);
+  }
+  updateRoleSettingsValidity();
+}
+
 function renderRuntimeSettings({ reset = false } = {}) {
   const settings = session.state.settings;
   const runtime = $("#setting-runtime").value === "codex" ? "codex" : "dsh";
@@ -1893,7 +1964,7 @@ function renderRuntimeSettings({ reset = false } = {}) {
   $("#codex-runtime-fields").classList.toggle("hidden", runtime !== "codex");
   $("#runtime-choice-note").innerHTML = runtime === "codex"
     ? t("<strong>Codex 已选为执行引擎。</strong>后续请求通过本机 stdio App Server；失败时可切回 dsh 重试。")
-    : t("<strong>DeepSeek Harness 仅支持手动模型模式。</strong>Sol / Terra / Luna 智能路由要求切换到 Codex App Server；系统不会把 dsh 模型冒充为这些角色。");
+    : t("<strong>DeepSeek Harness 仅支持手动模型模式。</strong>智能路由要求切换到 Codex App Server。");
 
   const modelSelect = $("#setting-codex-model");
   const previousModel = reset ? settings.codexModel : modelSelect.value || settings.codexModel;
@@ -1913,11 +1984,13 @@ function renderRuntimeSettings({ reset = false } = {}) {
     $("#setting-codex-effort").disabled = true;
     status.textContent = codexModelsStatus === "loading" ? t("正在通过本机 App Server 读取模型目录，不会提交模型任务。") : codexModelsStatus === "error" ? codexModelsError : t("切换到 Codex 后读取模型目录。");
   }
-  $("#save-settings").disabled = runtime === "codex" && (codexModelsStatus !== "ready" || !modelSelect.value);
+  renderCodexRoleSettings();
 }
 
 async function loadCodexModels(force = false) {
   if (codexModelsStatus === "loading" || (!force && codexModelsStatus === "ready")) return;
+  const preferredModel = $("#setting-codex-model").value || session.state.settings.codexModel;
+  const preferredEffort = $("#setting-codex-effort").value || session.state.settings.codexReasoningEffort;
   codexModelsStatus = "loading";
   codexModelsError = "";
   renderRuntimeSettings();
@@ -1926,16 +1999,21 @@ async function loadCodexModels(force = false) {
     codexModels = Array.isArray(payload.models) ? payload.models : [];
     if (!codexModels.length) throw new Error(t("本机 Codex 没有返回可选模型；请先确认登录与账号模型权限。"));
     codexModelsStatus = "ready";
+    if (codexModels.some(item => item.model === preferredModel)) {
+      $("#setting-codex-model").innerHTML = `<option value="${escapeHTML(preferredModel)}">${escapeHTML(preferredModel)}</option>`;
+    }
   } catch (error) {
     codexModels = [];
     codexModelsStatus = "error";
     codexModelsError = error.message;
   }
   renderRuntimeSettings();
+  if (codexModelsStatus === "ready") renderCodexEfforts(preferredEffort);
 }
 
 function renderSettings() {
   const settings = session.state.settings;
+  codexRoleDraft = structuredClone(settings.codexRoleModels ?? {});
   $("#setting-language").value = getLanguage();
   $("#setting-runtime").value = settings.agentRuntime === "codex" ? "codex" : "dsh";
   $("#setting-dsh").value = settings.dshPath;
@@ -2592,14 +2670,14 @@ function showInfo(kind) {
   }
   if (kind === "checkpoints") {
     const checkpoints = [...(project.checkpoints ?? [])].reverse();
-    $("#info-content").innerHTML = ui`<div class="checkpoint-note"><strong>检查点是固定的工作流坐标</strong><p>系统只在每一步决策前和重要执行前保存一次。回退只切换状态，不会新建、删除或消耗检查点，因此可以在已有坐标间反复切换；工作目录里的文件不会自动还原。</p></div><div class="conversation-list checkpoint-list">${checkpoints.length ? checkpoints.map((checkpoint) => {
+    $("#info-content").innerHTML = ui`<div class="checkpoint-note"><strong>检查点是固定的工作流坐标</strong><p>执行前保存文件与工作流检查点。回退会恢复当时的文件、节点结果与方向选择，并移除之后新增的文件；不会新增或消耗检查点。并行节点和连续构建按整批恢复。历史检查点若没有文件快照则无法完整回退。</p></div><div class="conversation-list checkpoint-list">${checkpoints.length ? checkpoints.map((checkpoint) => {
       const snapshot = checkpoint.snapshot ?? {};
       const stepId = checkpoint.stepId ?? snapshot.selectedStepId;
       const step = (snapshot.steps ?? []).find((item) => item.id === stepId);
       const completed = (snapshot.steps ?? []).filter((item) => item.status === "approved").length;
       const total = (snapshot.steps ?? []).length;
       const kindLabel = checkpoint.kind === "decision" ? t("决策前") : checkpoint.kind === "execution" ? t("重要执行前") : t("手动");
-      return ui`<div class="conversation-item checkpoint-item"><div class="conversation-meta"><strong>${escapeHTML(checkpoint.reason || t("未命名检查点"))}</strong><span><span class="checkpoint-kind">${escapeHTML(kindLabel)}</span>${escapeHTML(checkpoint.at ? new Date(checkpoint.at).toLocaleString() : t("未知时间"))} · ${escapeHTML(step ? ui`目标节点：${step.title}` : ui`进度：${completed}/${total}`)}</span></div><button class="secondary compact" data-restore-checkpoint="${escapeHTML(checkpoint.id)}">回退到这里</button></div>`;
+      return ui`<div class="conversation-item checkpoint-item"><div class="conversation-meta"><strong>${escapeHTML(checkpoint.reason || t("未命名检查点"))}</strong><span><span class="checkpoint-kind">${escapeHTML(kindLabel)}</span>${escapeHTML(checkpoint.at ? new Date(checkpoint.at).toLocaleString() : t("未知时间"))} · ${escapeHTML(step ? ui`目标节点：${step.title}` : ui`进度：${completed}/${total}`)}</span></div><button class="secondary compact" data-restore-checkpoint="${escapeHTML(checkpoint.id)}" ${checkpoint.workspaceSnapshot && !project.busy ? "" : "disabled"}>${checkpoint.workspaceSnapshot ? t("回退到这里") : t("缺少文件快照")}</button></div>`;
     }).join("") : t(`<p class="muted">当前还没有检查点。</p>`)}</div>`;
   }
   if (kind === "workspace") {
@@ -2846,7 +2924,7 @@ document.querySelectorAll("[data-transfer-mode]").forEach((target) => {
     try { await routeReferenceToMode(target.dataset.transferMode, reference); } catch (error) { showToast(error.message, true); }
   });
 });
-$("#open-settings").addEventListener("click", () => { renderSettings(); $("#settings-dialog").showModal(); if (session.installation?.codex?.found) loadCodexModels().catch(() => {}); });
+$("#open-settings").addEventListener("click", () => { renderSettings(); $("#settings-dialog").showModal(); if (session.installation?.codex?.found) loadCodexModels(true).catch(() => {}); });
 $("#open-remote").addEventListener("click", () => {
   if (!remoteUI.open && voiceUI.open) closeVoicePanel();
   setRemotePanel(!remoteUI.open, { focus: !remoteUI.open });
@@ -3085,6 +3163,7 @@ $("#workspace").addEventListener("click", async (event) => {
     retryReview.disabled = true;
     try {
       updateFromPayload(await api(`/api/projects/${project.id}/steps/${retryReview.dataset.retryAgentReview}/agent-review`, { method: "POST", body: "{}" }));
+      queueAutomaticWorkflow(project.id);
     } catch (error) { showToast(error.message, true); }
     finally { retryReview.disabled = false; }
     return;
@@ -3268,12 +3347,16 @@ $("#workspace").addEventListener("click", async (event) => {
     const answer = document.querySelector(`[data-direction-answer="${CSS.escape(stepId)}"]`)?.value.trim() ?? "";
     if (step?.directionOptions?.length && !optionId) { showToast(t("请先选择一个执行方向。"), true); return; }
     if (!step?.directionOptions?.length && !answer) { showToast(t("请先明确回复目标方向。"), true); return; }
+    directionSubmit.disabled = true;
     try {
       updateFromPayload(await api(`/api/projects/${project.id}/steps/${stepId}/direction`, { method: "POST", body: JSON.stringify({ optionId, supplemental, answer }) }));
       directionDrafts.delete(directionDraftKey(project.id, stepId));
       showToast(t("方向已确认，继续执行。"));
       queueAutomaticWorkflow(project.id);
-    } catch (error) { showToast(error.message, true); }
+    } catch (error) {
+      await resynchronizeExecutionState(project.id).catch(() => {});
+      showToast(error.message, true);
+    } finally { directionSubmit.disabled = false; }
     return;
   }
   if (event.target.closest(".direction-request")) return;
@@ -3281,10 +3364,12 @@ $("#workspace").addEventListener("click", async (event) => {
   if (adaptiveRollback) {
     const project = activeProject();
     selectedStepId = adaptiveRollback.dataset.adaptiveRollback;
+    adaptiveRollback.disabled = true;
     try {
       updateFromPayload(await api(`/api/projects/${project.id}/steps/${selectedStepId}/rollback`, { method: "POST", body: "{}" }));
-      showToast(t("节点执行状态已回退；工作目录文件没有自动恢复，请按节点回滚说明处理。"));
+      showToast(t("已恢复执行前的文件与工作流状态，未创建新检查点。"));
     } catch (error) { showToast(error.message, true); }
+    finally { adaptiveRollback.disabled = false; }
     return;
   }
   if (event.target.closest("[data-step-caution]")) return;
@@ -3356,6 +3441,7 @@ $("#workspace").addEventListener("click", async (event) => {
       const hasAttachments = (project?.attachments?.length ?? 0) + session.state.draftAttachments.length > 0;
       const goal = typedGoal || (hasAttachments ? t("请按附件中的完整需求执行。") : "");
       if (!goal) throw new Error(t("请先输入目标或添加附件。"));
+      if (await workflowLibraryUI.triggerPrompt(goal)) return;
       let targetProject = project;
       if (!targetProject) {
         const payload = await api("/api/projects", { method: "POST", body: JSON.stringify({ goal, attachmentIds: session.state.draftAttachments.map((item) => item.id) }) });
@@ -3681,7 +3767,7 @@ $("#info-dialog").addEventListener("click", async (event) => {
     const project = activeProject();
     const checkpoint = project?.checkpoints?.find((item) => item.id === checkpointRestore.dataset.restoreCheckpoint);
     if (!project || !checkpoint) return showToast(t("检查点不存在或状态已经改变。"), true);
-    if (!confirm(ui`回退到“${checkpoint.reason}”？\n\n只恢复 LoopCanvas 工作流状态，不会自动还原工作目录里的文件。本次回退不会新建、删除或消耗任何检查点。`)) return;
+    if (!confirm(ui`回退到“${checkpoint.reason}”？\n\n将恢复该检查点的文件与工作流状态，移除之后新增的文件。并行节点或连续构建按整批恢复；不会创建新检查点。`)) return;
     checkpointRestore.disabled = true;
     try {
       updateFromPayload(await api(`/api/projects/${project.id}/checkpoints/restore`, { method: "POST", body: JSON.stringify({ checkpointId: checkpoint.id }) }));
@@ -3738,6 +3824,21 @@ $("#confirm-plugin-enable").addEventListener("click", async () => {
 
 $("#setting-runtime").addEventListener("change", () => { renderRuntimeSettings(); if ($("#setting-runtime").value === "codex") loadCodexModels().catch(() => {}); });
 $("#setting-codex-model").addEventListener("change", () => renderCodexEfforts());
+$("#setting-smart-routing").addEventListener("change", updateRoleSettingsValidity);
+$("#codex-role-settings").addEventListener("change", (event) => {
+  const key = event.target.dataset.roleModel || event.target.dataset.roleEffort;
+  if (!Object.hasOwn(CODEX_ROLE_PROFILES, key)) return;
+  const profile = codexRoleProfile(key, { codexRoleModels: codexRoleDraft });
+  if (event.target.dataset.roleModel) {
+    const model = codexModels.find(item => item.model === event.target.value);
+    const efforts = model?.supportedReasoningEfforts ?? [];
+    const effort = efforts.some(item => item.reasoningEffort === profile.effort) ? profile.effort : model?.defaultReasoningEffort || efforts[0]?.reasoningEffort || "";
+    codexRoleDraft[key] = { model: event.target.value, effort };
+    renderCodexRoleEffort(key);
+  } else codexRoleDraft[key] = { ...profile, effort: event.target.value };
+  updateRoleSettingsValidity();
+});
+$("#reset-role-models").addEventListener("click", () => { codexRoleDraft = {}; renderCodexRoleSettings(); });
 $("#setting-language").addEventListener("change", (event) => {
   // Switching language is a browser preference, independent of runtime credentials.
   // Preserve unsent forms and running calls; never reload or resubmit the task.
@@ -3765,7 +3866,7 @@ $("#setting-language").addEventListener("change", (event) => {
   }
 });
 
-$("#settings-form").addEventListener("submit", async (event) => { if (event.submitter?.value !== "save") return; event.preventDefault(); try { const payload = await api("/api/settings", { method: "POST", body: JSON.stringify({ agentRuntime: $("#setting-runtime").value, dshPath: $("#setting-dsh").value, workspace: $("#setting-workspace").value, model: $("#setting-model").value, reasoningEffort: $("#setting-effort").value, cautionLevel: $("#setting-caution").value, smartRouting: $("#setting-smart-routing").checked, codexModel: $("#setting-codex-model").value, codexReasoningEffort: $("#setting-codex-effort").value }) }); session.state.settings = payload.settings; session.installation = payload.installation; runtimeStatus = runtimeStatus ? { ...runtimeStatus, agentRoute: null } : null; $("#settings-dialog").close(); render(); showToast(ui`${payload.settings.smartRouting === false ? t("手动模型") : t("智能路由")}已启用；执行引擎为 ${payload.settings.agentRuntime === "codex" ? "Codex App Server" : "DeepSeek Harness"}。`); } catch (error) { showToast(error.message, true); } });
+$("#settings-form").addEventListener("submit", async (event) => { if (event.submitter?.value !== "save") return; event.preventDefault(); try { const payload = await api("/api/settings", { method: "POST", body: JSON.stringify({ agentRuntime: $("#setting-runtime").value, dshPath: $("#setting-dsh").value, workspace: $("#setting-workspace").value, model: $("#setting-model").value, reasoningEffort: $("#setting-effort").value, cautionLevel: $("#setting-caution").value, smartRouting: $("#setting-smart-routing").checked, codexRoleModels: codexRoleDraft, codexModel: $("#setting-codex-model").value, codexReasoningEffort: $("#setting-codex-effort").value }) }); session.state.settings = payload.settings; session.installation = payload.installation; runtimeStatus = runtimeStatus ? { ...runtimeStatus, agentRoute: null } : null; $("#settings-dialog").close(); render(); showToast(ui`${payload.settings.smartRouting === false ? t("手动模型") : t("智能路由")}已启用；执行引擎为 ${payload.settings.agentRuntime === "codex" ? "Codex App Server" : "DeepSeek Harness"}。`); } catch (error) { showToast(error.message, true); } });
 $("#probe-local-agents").addEventListener("click", async () => { const button = $("#probe-local-agents"); const result = $("#probe-result"); button.disabled = true; result.textContent = t("正在检测 dsh 与 Codex……"); try { const payload = await api("/api/agents/probe", { method: "POST", body: JSON.stringify({ dshPath: $("#setting-dsh").value }) }); session.installation = payload.installation; renderHarness(); renderInstallationGuide(); const verified = [payload.installation.dsh, payload.installation.codex].filter((agent) => agent?.ready).length; result.textContent = ui`检测完成：${verified}/2 个运行时能力已验证`; if (payload.installation.codex?.ready) loadCodexModels(true).catch(() => {}); } catch (error) { result.textContent = error.message === "接口不存在。" ? t("服务版本较旧，请重启 LoopCanvas Web 后重试。") : error.message; } finally { button.disabled = false; } });
 $("#settings-dialog").addEventListener("click", async (event) => { if (event.target.id !== "copy-install-command") return; try { await navigator.clipboard.writeText("npx @deepseek-ai/dsh web"); showToast(t("安装命令已复制；请由你本人在终端粘贴并执行。")); } catch { showToast(t("复制失败，请手动选择命令文本。"), true); } });
 

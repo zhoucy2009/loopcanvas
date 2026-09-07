@@ -133,13 +133,13 @@ test("resolveCodex 可从 PATH 与 ChatGPT macOS 应用中首次发现", async (
     await mkdir(path.dirname(pathExecutable), { recursive: true });
     await writeFile(pathExecutable, "#!/bin/sh\nexit 0\n");
     await chmod(pathExecutable, 0o755);
-    assert.equal(await resolveCodex({ home: directory, envPath: path.dirname(pathExecutable), platform: "darwin", applicationsRoot: directory }), pathExecutable);
+    assert.equal(await resolveCodex({ home: directory, envPath: path.dirname(pathExecutable), platform: "darwin", applicationsRoot: directory, fallbackPaths: [] }), pathExecutable);
 
     const bundledExecutable = path.join(directory, "ChatGPT.app", "Contents", "Resources", "codex");
     await mkdir(path.dirname(bundledExecutable), { recursive: true });
     await writeFile(bundledExecutable, "#!/bin/sh\nexit 0\n");
     await chmod(bundledExecutable, 0o755);
-    assert.equal(await resolveCodex({ home: directory, envPath: "", platform: "darwin", applicationsRoot: directory }), bundledExecutable);
+    assert.equal(await resolveCodex({ home: directory, envPath: "", platform: "darwin", applicationsRoot: directory, fallbackPaths: [] }), bundledExecutable);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -43,7 +43,7 @@ Open **Settings**, select **DeepSeek Harness** or **Codex App Server**, and clic
 ## Main capabilities
 
 - **Agent workflow:** read-only planner, dependency graph, scoped executors, independent step reviewers, final deliverable judge, versioned context handoffs, and explicit direction/concurrency choices.
-- **Per-step rollback:** reopen a single node, restore reusable checkpoints, or retry only a failed review. Workflow state is restored; disk files are **not** automatically reverted.
+- **Per-step rollback:** each execution saves files and workflow state in an isolated Git worktree checkpoint. Rollback restores the existing pre-execution checkpoint, including uncommitted, untracked and ignored files, removes later additions, and creates no new checkpoint. The original repository’s Git metadata is preserved. Parallel batches and legacy continuous builds restore as a whole. Old checkpoints without file snapshots cannot be fully restored. Git must be installed.
 - **Live preview:** inspect the current artifact next to the debug console. A new preview pauses automatic execution until you inspect or skip it.
 - **UI → source → edit:** Cmd/Ctrl-click selects an element and traces its code. Submit targeted feedback to repair the originating step. Shift opens the visual layout editor; drag or resize anchored elements and confirm exact source updates.
 - **Voice:** English and Chinese browser commands can call the planner, execute a numbered node, request step/final review, search, learn, preview, or roll back. State-changing actions retain confirmation. Browser speech support is required. An optional macOS helper provides Chinese on-device background wake words.
@@ -54,6 +54,14 @@ Open **Settings**, select **DeepSeek Harness** or **Codex App Server**, and clic
 - **Project management:** isolated workspaces, pins, rename/archive/restore, drafts, checkpoints, redacted call logs, and interrupted-request recovery.
 
 For the full architecture and limitations, see the [technical overview](https://github.com/zhoucy2009/loopcanvas/blob/main/docs/technical-overview.md).
+
+## Custom smart routing
+
+Settings lets you choose a model and reasoning effort independently for planning, learning, research, step review and final review. Expand Execution and source tracing to configure build, integration/delivery, risk/verification and source tracing. Options come from the local Codex catalog and are validated both before saving and before each call. Global `codexRoleModels` settings apply to subsequent calls. Restore defaults and save to return to the original role assignments. Changing models preserves role responsibilities, read-only restrictions and independent review.
+
+## Codex updates
+
+Codex discovery compares installed CLI and desktop-bundle versions and uses the newest one (desktop bundle wins a tie). Explicit `LOOPCANVAS_CODEX_EXECUTABLE` overrides remain pinned. The web launcher checks for standalone Codex updates at startup and every six hours while running, using Codex's native noninteractive updater. Subsequent Agent calls pick up the updated version; existing calls are not restarted. Update failures are logged and retried at the next interval. Desktop bundles and package-manager installations remain managed by their own updaters. Set `LOOPCANVAS_CODEX_AUTO_UPDATE=0` to disable background updates. Reopening Settings refreshes the model catalog and preserves a still-available model and reasoning choice. Model availability remains determined by the signed-in Codex account.
 
 ## Data and security
 

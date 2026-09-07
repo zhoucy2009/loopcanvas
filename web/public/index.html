@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LoopCanvas</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/workflow-library.css">
 </head>
 <body>
   <div id="app" class="app-shell" aria-busy="false">
@@ -14,6 +15,7 @@
         <div><strong>LoopCanvas</strong><span>Agent workflow workbench</span></div>
       </div>
       <button id="new-project" class="primary wide">＋ 新需求</button>
+      <button id="open-workflow-library" class="ghost wide">自定义工作流</button>
       <div class="section-label">工作项目</div>
       <nav id="project-list" class="project-list" aria-label="工作项目"></nav>
       <details id="archived-projects" class="archived-projects">
@@ -156,7 +158,7 @@
       <div id="install-guide" class="install-guide"></div>
       <label>当前执行引擎<select id="setting-runtime"><option value="dsh">DeepSeek Harness (dsh)</option><option value="codex">Codex App Server</option></select></label>
       <p id="runtime-choice-note" class="runtime-choice-note" role="status" aria-live="polite"></p>
-      <label class="smart-routing-toggle"><input id="setting-smart-routing" type="checkbox"><span><strong>启用智能路由</strong><small>智能路由仅可由 Codex 执行；选择 dsh 时请保持关闭，否则角色任务会被明确拒绝，不会冒充 Sol / Terra / Luna。</small></span></label>
+      <label class="smart-routing-toggle"><input id="setting-smart-routing" type="checkbox"><span><strong>启用智能路由</strong><small>按角色和节点类型分配模型；需要使用 Codex App Server。</small></span></label>
       <div id="dsh-runtime-fields" class="runtime-fields">
         <label>dsh 可执行文件（留空自动检测）<input id="setting-dsh" placeholder="/完整路径/dsh"></label>
         <div class="form-grid">
@@ -165,9 +167,13 @@
         </div>
       </div>
       <div id="codex-runtime-fields" class="runtime-fields hidden">
-        <div class="smart-routing-matrix" aria-label="智能路由角色分工">
-          <div><span>规划者</span><strong>Sol high</strong></div><div><span>学习 / 搜索</span><strong>Luna light</strong></div><div><span>执行者</span><strong>按节点选择</strong></div><div><span>审核 / 终审</span><strong>Sol high / xhigh</strong></div>
-        </div>
+        <fieldset id="codex-role-settings" class="codex-role-settings">
+          <legend>智能路由模型</legend>
+          <div class="codex-role-heading"><p>分别选择模型与推理强度，保存后用于后续调用。</p><button type="button" id="reset-role-models" class="ghost compact">恢复默认</button></div>
+          <div id="codex-primary-roles"></div>
+          <details class="codex-advanced-roles"><summary>执行者与源码追溯</summary><p>执行者继续按节点分配；高风险和验证节点优先使用对应配置。</p><div id="codex-execution-roles"></div></details>
+        </fieldset>
+        <p id="codex-role-status" class="runtime-status" role="status" aria-live="polite"></p>
         <div class="form-grid">
           <label>Codex 回退模型<select id="setting-codex-model" disabled><option value="">等待加载模型目录…</option></select></label>
           <label>回退推理强度<select id="setting-codex-effort" disabled><option value="">由模型决定</option></select></label>

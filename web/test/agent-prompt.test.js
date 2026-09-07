@@ -103,3 +103,12 @@ test("稳定序列化不改变 request 值并把动态 id 放到末尾", () => {
   assert.deepEqual(request, before);
   assert.ok(serialized.lastIndexOf('"id"') > serialized.indexOf('"responseInstructions"'));
 });
+
+
+test("custom workflow execution prompt permits its node while generation stays read-only", () => {
+  const execution = buildAgentPrompt({runtime:"codex",workspace:"/tmp/workflow",request:{id:"wf",kind:"custom_workflow_execute",agentRole:"executor"}});
+  assert.match(execution,/只执行 request.node/);
+  assert.doesNotMatch(execution,/本次是只读分析/);
+  const generation = buildAgentPrompt({runtime:"codex",workspace:"/tmp/workflow",request:{id:"wf",kind:"custom_workflow_generate",agentRole:"planner"}});
+  assert.match(generation,/不得实际执行工具调用/);
+});

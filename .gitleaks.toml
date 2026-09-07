@@ -1,0 +1,20 @@
+title = "LoopCanvas secret scanning"
+
+[extend]
+useDefault = true
+
+# Exact synthetic values used to verify diagnostic redaction. Keep scanning
+# these files so future real credentials cannot hide behind a path exclusion.
+[[allowlists]]
+description = "Synthetic JavaScript diagnostic redaction fixture"
+condition = "AND"
+paths = ['''(^|/)web/test/diagnostics\.test\.js$''']
+regexTarget = "secret"
+regexes = ['''^sk-1234567890abcdef$''']
+
+[[allowlists]]
+description = "Synthetic Swift diagnostic redaction fixture"
+condition = "AND"
+paths = ['''(^|/)Tests/LoopCanvasTests/ModelAPITests\.swift$''']
+regexTarget = "secret"
+regexes = ['''^sk-abcdefghijk123456$''']

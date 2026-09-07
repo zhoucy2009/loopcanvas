@@ -59,7 +59,7 @@ function spriteFixture(t, reducedMotion = false) {
   const nodes = new Map(), flights = [];
   const node = (key) => {
     if (!nodes.has(key)) nodes.set(key, {
-      dataset: {}, style: {}, classList: { toggle() {} }, addEventListener() {},
+      dataset: {}, style: {}, classList: { values: new Set(), toggle(name, on) { if (on) this.values.add(name); else this.values.delete(name); } }, addEventListener() {},
       getBoundingClientRect: () => ({ left: key.includes("work") ? 30 : 600, top: 40, width: 60 }),
       animate(frames, options) {
         let finish;
@@ -71,11 +71,11 @@ function spriteFixture(t, reducedMotion = false) {
     });
     return nodes.get(key);
   };
-  const globals = { window: { addEventListener() {} }, document: { hidden: false, addEventListener() {} }, innerWidth: 1280, ResizeObserver: class { observe() {} } };
+  const globals = { window: { addEventListener() {} }, document: { hidden: false, addEventListener() {}, querySelector: (selector) => selector === "#workspace, .workspace" ? { getBoundingClientRect: () => ({ left: 240, top: 220, width: 1000, bottom: 900 }) } : null }, innerHeight: 900, innerWidth: 1280, ResizeObserver: class { observe() {} } };
   const previous = Object.fromEntries(Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   Object.assign(globalThis, globals);
   t.after(() => { for (const key of Object.keys(globals)) { if (previous[key]) Object.defineProperty(globalThis, key, previous[key]); else delete globalThis[key]; } });
-  const stage = new AgentSprites({ querySelector: node }, { localize: () => {}, reducedMotion: () => reducedMotion });
+  const stage = new AgentSprites({ querySelector: node, classList: { toggle() {} } }, { localize: () => {}, reducedMotion: () => reducedMotion });
   return { stage, flights, nodes };
 }
 
@@ -148,4 +148,57 @@ test("后台项目的本地完成不会释放当前项目同色工作", async (t
   assert.equal(stage.occupancy.counts("p2").execute, 1);
   newFinish();
   assert.equal(stage.targets.get("execute"), "pod");
+});
+
+
+test("精灵抵达大型工作区后化成对应边框，归队时释放边框", async (t) => {
+  const { stage, flights, nodes } = spriteFixture(t);
+  stage.setProject("p1");
+  stage.sync([{ role: "plan", projectId: "p1" }, { role: "review", projectId: "p1" }]);
+  const border = nodes.get('[data-border="plan"]');
+  assert.equal(border.classList.values.has("attached"), false, "抵达前不提前显示边框");
+  assert.deepEqual(stage.point("plan", "work"), { x: 1202, y: 192 });
+  for (const flight of flights) flight.finish();
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(border.classList.values.has("attached"), true);
+  assert.equal(border.style.left, "234px");
+  assert.equal(border.style.top, "214px");
+  assert.equal(nodes.get('[data-spirit="plan"]').style.opacity, "0");
+  assert.equal(nodes.get('[data-border="review"]').classList.values.has("attached"), true);
+  stage.sync([{ role: "review", projectId: "p1" }]);
+  assert.equal(border.classList.values.has("attached"), false);
+  assert.equal(nodes.get('[data-border="review"]').classList.values.has("attached"), true);
+});
+
+
+test("外圈跟随工作区滚动，不在视口边缘生成遮挡内容的横线", (t) => {
+  const { stage, nodes } = spriteFixture(t, true);
+  stage.setProject("p1");
+  stage.sync([{ role: "review", projectId: "p1" }]);
+  stage.workspace.getBoundingClientRect = () => ({ left: 240, top: -400, width: 1000, bottom: 1300 });
+  stage.layout(false);
+  const border = nodes.get('[data-border="review"]');
+  assert.equal(border.style.left, "228px");
+  assert.equal(border.style.top, "-412px", "顶边随内容离开视口");
+  assert.equal(border.style.height, "1724px", "不压缩成视口内的悬浮边框");
+  assert.equal(border.style.clipPath, "inset(412px 0 412px 0)");
+});
+
+
+test("DeepSeek 切换只替换形象，不重置工作、飞行或角色边框", (t) => {
+  const { stage, flights } = spriteFixture(t);
+  const classes = new Set();
+  stage.root.classList.toggle = (name, enabled) => enabled ? classes.add(name) : classes.delete(name);
+  stage.setProject("p1");
+  stage.sync([{ role: "review", projectId: "p1" }]);
+  const flight = stage.animations.get("review");
+  const count = flights.length;
+  stage.setHarness("dsh");
+  assert.ok(classes.has("deepseek-sprites"));
+  assert.equal(stage.animations.get("review"), flight);
+  assert.equal(stage.targets.get("review"), "work");
+  assert.equal(flights.length, count);
+  stage.setHarness("codex");
+  assert.equal(classes.has("deepseek-sprites"), false);
+  assert.equal(stage.occupancy.counts("p1").review, 1);
 });

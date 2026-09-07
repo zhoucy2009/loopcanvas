@@ -1,3 +1,8 @@
+import { WorkflowLibrary, WorkflowRuntime } from "./workflow-library.js";
+import { normalizeCodexRoleModels, validateCodexRoleCatalog } from "../public/smart-routing-config.js";
+import { workflowAPI } from "./workflow-api.js";
+import { createWorkflowTools } from "./workflow-tools.js";
+import { executeWorkflowNodeWithHarness, generateWorkflowNodesWithHarness } from "./harness.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -7,12 +12,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   analyzeDirectives, answerStepDirection, appendContext, appendLog, approveStep, applyAdaptiveRoute, applyPlan, executionReadiness, generateHandoff, moveStep,
-  readyAdaptiveSteps, recoverInterruptedAdaptiveExecution, rejectStep, reopenForRepair, reopenStep, returnVerificationToRepair, rollbackStep, setStepCaution, StateStore
+  readyAdaptiveSteps, recoverInterruptedAdaptiveExecution, rejectStep, reopenForRepair, reopenStep, returnVerificationToRepair, setStepCaution, StateStore
 } from "./store.js";
 import {
   executeProjectWithHarness, executeWithHarness, executionResultForServer, exploreWithHarness, installationStatus, learnWithHarness,
   finalReviewWithHarness, normalizeProjectExecutionResponse, planWithHarness, reviewStepWithHarness,
-  listCodexModels, probeHarness, probeLocalAgents, resolveProjectWorkspace, runProcess, summarizeRepositoryWithHarness,
+  listCodexModels, listCodexTools, probeHarness, probeLocalAgents, resolveProjectWorkspace, runProcess, summarizeRepositoryWithHarness,
   tracePreviewWithHarness
 } from "./harness.js";
 import {
@@ -557,7 +562,7 @@ function releaseProjectCall(activeControllers, busyProjects, projectId, controll
 
 const previewDiagnosticsScript = `<script src="/preview-trace.js" data-error-panel="dshwf-preview-error"></script>`;
 const previewHiddenStateStyle = `<style id="loopcanvas-preview-hidden-state">[hidden]{display:none!important}</style>`;
-const previewContentSecurityPolicy = (previewOrigin) => `default-src 'none'; script-src 'self' ${previewOrigin} 'unsafe-inline' https:; style-src 'self' ${previewOrigin} 'unsafe-inline' https:; img-src 'self' ${previewOrigin} data: blob: https:; media-src 'self' ${previewOrigin} data: blob: https:; font-src 'self' ${previewOrigin} data: https:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`;
+const previewContentSecurityPolicy = (previewOrigin) => `sandbox allow-scripts; default-src 'none'; script-src 'self' ${previewOrigin} 'unsafe-inline' https:; style-src 'self' ${previewOrigin} 'unsafe-inline' https:; img-src 'self' ${previewOrigin} data: blob: https:; media-src 'self' ${previewOrigin} data: blob: https:; font-src 'self' ${previewOrigin} data: https:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`;
 const previewDependencyPrefix = "__dependency__/";
 const previewDependencyMaximumBytes = 8 * 1024 * 1024;
 const previewDependencyTimeoutMs = 15_000;
@@ -718,16 +723,46 @@ export async function createLoopCanvasServer(options = {}) {
   const probeRunner = options.probeHarness ?? probeHarness;
   const localAgentsProbeRunner = options.probeLocalAgents ?? probeLocalAgents;
   const codexModelsRunner = options.listCodexModels ?? listCodexModels;
+  const codexToolsRunner = options.listCodexTools ?? listCodexTools;
   await mkdir(dataDirectory, { recursive: true });
   const store = new StateStore(path.join(dataDirectory, "state.json"), workspace);
   const pendingLearningImports = new Map();
   await store.load();
+  const workflowLibrary = new WorkflowLibrary(path.join(dataDirectory, "workflows.sqlite"));
+  const workflowTools = createWorkflowTools({ dataDirectory, processRunner });
+  let workflowToolCache = { key: "", at: 0, tools: [] };
+  const workflowToolCatalog = async ({ refresh = false } = {}) => {
+    const current = await harnessSettings();
+    const key = JSON.stringify([current.agentRuntime, current.codexPath || process.env.LOOPCANVAS_CODEX_EXECUTABLE || "", current.workspace]);
+    if (!refresh && workflowToolCache.key === key && Date.now() - workflowToolCache.at < 30_000) return workflowToolCache.tools;
+    const tools = [...await workflowTools.catalog(), ...await codexToolsRunner(current)];
+    workflowToolCache = { key, at: Date.now(), tools };
+    return tools;
+  };
+  const agentWorkflowExecutor = agentPresence.wrap("execute", options.executeWorkflowNodeWithHarness ?? executeWorkflowNodeWithHarness);
+  const workflowRuntime = new WorkflowRuntime(workflowLibrary, async (...args) => (await workflowTools.execute(...args)) ?? agentWorkflowExecutor(...args));
+  const handleWorkflowAPI = workflowAPI({ library: workflowLibrary, runtime: workflowRuntime, dataDirectory, generate: agentPresence.wrap("plan", options.generateWorkflowNodesWithHarness ?? generateWorkflowNodesWithHarness), toolCatalog: workflowToolCatalog, settings: harnessSettings, readJSON, json });
   const remoteManager = options.remoteManager ?? await new RemoteManager({ dataDirectory, ...(options.remote ?? {}) }).load();
   const runtimePreviewManager = options.runtimePreviewManager ?? createRuntimePreviewManager(options.runtimePreview ?? {});
   const token = randomBytes(24).toString("base64url");
   const voiceWake = new VoiceWakeBroker();
   const busyProjects = new Set();
   const activeControllers = new Map();
+  const restoringProjects = new Set();
+  const checkpointBeforeCall = async (project, reason, details, controller) => {
+    try { return await store.createCheckpoint(project.id, reason, details); }
+    catch (error) { releaseProjectCall(activeControllers, busyProjects, project.id, controller); throw error; }
+  };
+  const restoreProject = async (projectId, restore, restoring = true) => {
+    if (busyProjects.has(projectId) || agentPresence.snapshot().calls.some((call) => call.projectId === projectId)) throw new Error("项目仍在执行或停止中，请等待 Agent 退出后再回退。");
+    busyProjects.add(projectId);
+    restoringProjects.add(projectId);
+    try {
+      await runtimePreviewManager.stop?.(projectId);
+      await restore();
+      if (restoring) updateRuntime(projectId, { active: false, activity: "已恢复执行前的文件与工作流状态", percent: null });
+    } finally { restoringProjects.delete(projectId); busyProjects.delete(projectId); }
+  };
   const activeModeCalls = new Set();
   const runtimeStates = new Map();
   const runtimeMetrics = new Map();
@@ -844,13 +879,18 @@ export async function createLoopCanvasServer(options = {}) {
         }
         const project = projectOrThrow(store, runtimeProjectId);
         if (!isRuntimePreviewArtifact(project.artifact)) return json(response, 404, { error: "当前产物没有可运行的图形预览。" });
+        if (restoringProjects.has(project.id)) return json(response, 409, { error: "正在恢复项目文件，请稍后重试。" });
         await runtimePreviewManager.proxy(project, request, response);
         return;
       }
+      const targetProjectId = url.pathname.match(/^\/api\/projects\/([^/]+)/)?.[1];
+      if (restoringProjects.has(targetProjectId)) return json(response, 409, { error: "正在恢复项目文件，请稍后重试。" });
       const isAPI = url.pathname.startsWith("/api/");
       if (isAPI && request.method !== "GET" && request.headers["x-loopcanvas-token"] !== token) {
-        return json(response, 403, { error: "会话令牌无效，请刷新页面。" });
+        return json(response, 403, { error: "会话令牌无效，请刷新页面。", code: "SESSION_TOKEN_EXPIRED" });
       }
+
+      if (await handleWorkflowAPI(request, response, url)) return;
 
       const previewMatch = url.pathname.match(/^\/preview\/([^/]+)(?:\/(.*))?$/);
       if (request.method === "GET" && previewMatch) {
@@ -901,8 +941,9 @@ export async function createLoopCanvasServer(options = {}) {
         const allowed = new Set([artifact.filename, ...(artifact.files ?? [])].map((item) => path.normalize(item)));
         const normalized = path.normalize(requested);
         if (!allowed.has(normalized)) return json(response, 403, { error: "该文件不在产物清单中。" });
-        const root = path.resolve(artifact.projectRoot);
-        const candidate = path.resolve(root, normalized);
+        const root = await realpath(artifact.projectRoot);
+        const candidate = await realpath(path.resolve(root, normalized)).catch(() => null);
+        if (!candidate) return json(response, 404, { error: "产物文件不存在。" });
         const relative = path.relative(root, candidate);
         if (relative.startsWith("..") || path.isAbsolute(relative)) return json(response, 403, { error: "预览路径越界。" });
         const info = await stat(candidate).catch(() => null);
@@ -917,7 +958,7 @@ export async function createLoopCanvasServer(options = {}) {
           });
           return response.end(body);
         }
-        response.writeHead(200, { "Content-Type": mimeTypes[path.extname(candidate).toLowerCase()] ?? "application/octet-stream", "Content-Length": info.size, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+        response.writeHead(200, { "Content-Type": mimeTypes[path.extname(candidate).toLowerCase()] ?? "application/octet-stream", "Content-Length": info.size, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": previewContentSecurityPolicy(url.origin) });
         return createReadStream(candidate).pipe(response);
       }
 
@@ -994,7 +1035,13 @@ export async function createLoopCanvasServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/settings") {
-        const settings = await store.updateSettings(await readJSON(request));
+        const input = await readJSON(request);
+        if (Object.hasOwn(input, "codexRoleModels")) {
+          input.codexRoleModels = normalizeCodexRoleModels(input.codexRoleModels);
+          const proposed = { ...store.state.settings, ...input };
+          if (proposed.agentRuntime === "codex" && proposed.smartRouting !== false) validateCodexRoleCatalog(input.codexRoleModels, await codexModelsRunner(proposed));
+        }
+        const settings = await store.updateSettings(input);
         return json(response, 200, { settings, installation: await installationStatus(settings) });
       }
 
@@ -1074,7 +1121,7 @@ export async function createLoopCanvasServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/capabilities") {
-        return json(response, 200, { items: await scanCapabilities(url.searchParams.get("kind"), store.state.settings.workspace) });
+        return json(response, 200, { items: [...await scanCapabilities(url.searchParams.get("kind"), store.state.settings.workspace), ...(url.searchParams.get("kind") === "skills" ? workflowLibrary.catalog().skills.map((s) => ({ id: s.id, name: s.name, path: "本机工作流 Skill 库", detail: s.detail })) : [])] });
       }
 
       if (request.method === "GET" && url.pathname === "/api/diagnostics") {
@@ -1838,20 +1885,14 @@ export async function createLoopCanvasServer(options = {}) {
       const checkpointMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/checkpoints$/);
       if (request.method === "POST" && checkpointMatch) {
         const { reason } = await readJSON(request);
-        await store.createCheckpoint(checkpointMatch[1], String(reason ?? "手动检查点"));
+        await restoreProject(checkpointMatch[1], () => store.createCheckpoint(checkpointMatch[1], String(reason ?? "手动检查点")), false);
         return json(response, 200, { state: publicState(store, busyProjects) });
       }
 
       const restoreCheckpointMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/checkpoints\/restore$/);
       if (request.method === "POST" && restoreCheckpointMatch) {
-        const controller = activeControllers.get(restoreCheckpointMatch[1]);
-        controller?.abort();
-        if (controller) {
-          activeControllers.delete(restoreCheckpointMatch[1]);
-          busyProjects.delete(restoreCheckpointMatch[1]);
-        }
         const { checkpointId = "" } = await readJSON(request);
-        await store.restoreCheckpoint(restoreCheckpointMatch[1], String(checkpointId || "") || null);
+        await restoreProject(restoreCheckpointMatch[1], () => store.restoreCheckpoint(restoreCheckpointMatch[1], String(checkpointId || "") || null));
         return json(response, 200, { state: publicState(store, busyProjects) });
       }
 
@@ -1893,12 +1934,16 @@ export async function createLoopCanvasServer(options = {}) {
           const goal = String(body.goal ?? project.goal).trim();
           if (!goal) throw new Error("请先输入目标。");
           const wasDraft = !project.goal;
+          const goalChanged = Boolean(project.goal) && project.goal !== goal;
           project.goal = goal;
           project.title ||= goal.slice(0, 28);
           project.directives = analyzeDirectives(goal);
           if (wasDraft) {
             appendContext(project, "user", goal, null, "用户");
             appendLog(project, "system", "收到用户需求", "由 Harness 判断一步直达或真实执行图，并立即开始。");
+          } else if (goalChanged) {
+            appendContext(project, "user", goal, null, "用户更新需求");
+            appendLog(project, "decision", "更新原始需求并重新规划", "已用修改后的需求替换上次失败的规划请求。");
           }
           const selected = new Set(Array.isArray(body.attachmentIds) ? body.attachmentIds : []);
           const claimed = state.draftAttachments.filter((item) => selected.has(item.id));
@@ -1910,6 +1955,7 @@ export async function createLoopCanvasServer(options = {}) {
         busyProjects.add(project.id);
         const controller = new AbortController();
         activeControllers.set(project.id, controller);
+        const routeCheckpointId = await checkpointBeforeCall(project, "判断与执行前", { kind: "execution" }, controller);
         await store.mutate(() => {
           project.phase = "planning";
           project.lastError = null;
@@ -1932,6 +1978,10 @@ export async function createLoopCanvasServer(options = {}) {
             if (planned.result.executionShape === "single" && store.state.settings.smartRouting === false) {
               assertPrimaryArtifactMatches(project, planned.result.execution);
               commitAdaptiveSingle(project, planned.result);
+              project.steps[0].rollbackCheckpointId = routeCheckpointId;
+              const checkpoint = project.checkpoints.find((item) => item.id === routeCheckpointId);
+              checkpoint.stepId = project.steps[0].id;
+              checkpoint.stepIds = [project.steps[0].id];
             } else {
               project.pendingAction = null;
             }
@@ -1982,61 +2032,21 @@ export async function createLoopCanvasServer(options = {}) {
         const project = projectOrThrow(store, adaptiveDirectionMatch[1]);
         if (busyProjects.has(project.id)) throw new Error("节点正在执行，不能提交方向答复。");
         const { answer = "", optionId = "", supplemental = "" } = await readJSON(request);
-        const requireAgentReview = store.state.settings.smartRouting !== false && enforceAgentReviewChain;
+        const step = project.steps.find((item) => item.id === adaptiveDirectionMatch[2]);
+        if (!step) throw new Error("步骤不存在。");
+        await store.createCheckpoint(project.id, "确认方向前", { stepId: step.id, kind: "decision" });
         await store.mutate(() => {
-          answerStepDirection(project, adaptiveDirectionMatch[2], { answer, optionId, supplemental });
-          if (requireAgentReview) project.steps.find((step) => step.id === adaptiveDirectionMatch[2]).status = "review";
+          // A user selection is input, not an independently reviewed execution result.
+          // Resolve the decision's remaining acceptance criteria through the normal
+          // executor/reviewer chain, which can ask a specific follow-up if needed.
+          step.directionExecutionRequired = store.state.settings.smartRouting !== false && enforceAgentReviewChain;
+          answerStepDirection(project, step.id, { answer, optionId, supplemental });
+          step.agentReview = null;
+          step.reviewPending = false;
+          step.lastError = null;
+          project.lastError = null;
           project.executionRun = { ...(project.executionRun ?? {}), status: "ready", error: null, awaitingStepIds: [] };
         });
-        if (requireAgentReview) {
-          const step = project.steps.find((item) => item.id === adaptiveDirectionMatch[2]);
-          busyProjects.add(project.id);
-          const controller = new AbortController();
-          activeControllers.set(project.id, controller);
-          const runtime = store.state.settings.agentRuntime === "codex" ? "codex" : "dsh";
-          try {
-            updateRuntime(project.id, { active: true, runtime, activity: `审核者正在检查方向：${step.title}`, stepId: step.id, stepTitle: step.title });
-            const review = await reviewRunner({ project: structuredClone(project), step: structuredClone(step), result: structuredClone(step.result) }, await harnessSettings(), controller.signal, recordAgentEvent(project.id, runtime, step.id));
-            await store.mutate(() => {
-              const recordedReview = { verdict: review.verdict, summary: review.summary, findings: review.findings ?? [], verifiedEvidence: review.verifiedEvidence ?? [], route: review.route ?? null, reviewedRevision: review.reviewedRevision, at: new Date().toISOString() };
-              step.agentReview = recordedReview;
-              if (review.verdict === "pass") {
-                step.status = "approved";
-                readyAdaptiveSteps(project);
-              } else {
-                const feedback = [review.summary, ...(review.findings ?? []).map((item) => item.repairInstruction).filter(Boolean)].join("；").slice(0, 8_000);
-                reopenForRepair(project, step.id, feedback, null, review.findings ?? []);
-                step.agentReview = recordedReview;
-                step.directionAnswer = "";
-                step.selectedDirectionOptionId = null;
-                step.directionSupplement = "";
-                project.executionRun = { ...(project.executionRun ?? {}), status: "awaiting_direction", error: null, awaitingStepIds: [step.id] };
-              }
-              appendLog(project, "review", review.verdict === "pass" ? "方向审核通过" : "方向审核要求重新确认", review.summary, step.id);
-            });
-            updateRuntime(project.id, { active: false, activity: review.verdict === "pass" ? "方向审核通过" : "方向需要重新确认", stepId: step.id, stepTitle: step.title });
-          } catch (error) {
-            if (ownsProjectCall(activeControllers, project.id, controller)) {
-              await store.mutate(() => {
-                step.status = "ready";
-                step.result = null;
-                step.agentReview = null;
-                step.directionAnswer = "";
-                step.selectedDirectionOptionId = null;
-                step.directionSupplement = "";
-                step.lastError = error.message;
-                project.lastError = `方向审核失败：${error.message}`;
-                project.executionRun = { ...(project.executionRun ?? {}), status: "awaiting_direction", error: error.message, awaitingStepIds: [step.id] };
-                project.pendingAction = null;
-                appendLog(project, "review", "方向审核失败，已恢复待确认", error.message, step.id);
-              });
-            }
-            updateRuntime(project.id, { active: false, activity: `方向审核失败：${error.message}`, stepId: step.id, stepTitle: step.title });
-            throw error;
-          } finally {
-            releaseProjectCall(activeControllers, busyProjects, project.id, controller);
-          }
-        }
         return json(response, 200, { state: publicState(store, busyProjects) });
       }
 
@@ -2170,7 +2180,7 @@ export async function createLoopCanvasServer(options = {}) {
               {
                 stepId: batch[0].id,
                 kind: "execution",
-                key: `execution:${batch.map((step) => step.id).sort().join("+")}`
+                stepIds: batch.map((step) => step.id)
               }
             );
             await store.mutate(() => {
@@ -2267,6 +2277,7 @@ export async function createLoopCanvasServer(options = {}) {
             if (repairRequested) break;
             if (requestedStepId && !project.steps.every((step) => step.status === "approved")) {
               await store.mutate(() => {
+                readyAdaptiveSteps(project);
                 project.executionRun = { ...(project.executionRun ?? {}), status: "ready", error: null, awaitingStepIds: [] };
                 project.pendingAction = null;
               });
@@ -2383,7 +2394,7 @@ export async function createLoopCanvasServer(options = {}) {
       if (request.method === "POST" && continuousExecuteMatch) {
         const project = projectOrThrow(store, continuousExecuteMatch[1]);
         const { feedback = "" } = await readJSON(request);
-        if (store.state.settings.smartRouting !== false) throw new Error("智能路由要求逐节点执行、Sol high 审核和最终裁决；连续单 Agent 模式仅可在关闭智能路由后用于旧项目。");
+        if (store.state.settings.smartRouting !== false) throw new Error("智能路由要求逐节点执行、独立审核和最终裁决；连续单 Agent 模式仅可在关闭智能路由后用于旧项目。");
         if (project.executionMode !== "continuous") throw new Error("这个历史项目仍使用逐步执行模式。");
         if (!project.steps.length || !project.primaryArtifact) throw new Error("项目尚未生成包含主交付物的成果路线。");
         if (project.steps.some((step) => ["L2", "L3"].includes(step.riskLevel))) throw new Error("成果路线包含高风险节点，需要先逐项确认，不能连续自动执行。");
@@ -2392,6 +2403,7 @@ export async function createLoopCanvasServer(options = {}) {
         busyProjects.add(project.id);
         const controller = new AbortController();
         activeControllers.set(project.id, controller);
+        await checkpointBeforeCall(project, "连续构建前（整次执行）", { kind: "execution", stepId: project.steps[0].id, stepIds: project.steps.map((step) => step.id) }, controller);
         await store.mutate(() => {
           const now = new Date().toISOString();
           project.executionRun = { status: "running", startedAt: now, completedAt: null, error: null };
@@ -2489,6 +2501,7 @@ export async function createLoopCanvasServer(options = {}) {
         busyProjects.add(project.id);
         const controller = new AbortController();
         activeControllers.set(project.id, controller);
+        await checkpointBeforeCall(project, `执行前 · ${step.title}`, { kind: "execution", stepId: step.id }, controller);
         await store.mutate(() => {
           step.status = "running"; project.updatedAt = new Date().toISOString();
           if (subprocess) {
@@ -2636,7 +2649,7 @@ export async function createLoopCanvasServer(options = {}) {
             else if (project.executionMode?.startsWith("adaptive")) {
               const recordedReview = step.agentReview;
               const feedback = [review.summary, ...(review.findings ?? []).map((item) => item.repairInstruction).filter(Boolean)].join("；").slice(0, 8_000);
-              reopenForRepair(project, step.id, feedback, null, review.findings ?? []);
+              reopenForRepair(project, step.id, feedback, null, review.findings ?? [], { preserveDirection: step.directionExecutionRequired === true });
               step.agentReview = recordedReview;
               project.finalReview = null;
             }
@@ -2676,7 +2689,7 @@ export async function createLoopCanvasServer(options = {}) {
         const project = projectOrThrow(store, finalReviewMatch[1]);
         if (!project.artifact) throw new Error("当前还没有主交付物，不能最终审核。");
         if (!project.steps.length || project.steps.some((step) => step.status !== "approved" || (store.state.settings.smartRouting !== false && step.agentReview?.verdict !== "pass"))) {
-          throw new Error(store.state.settings.smartRouting !== false ? "所有步骤必须先由 Sol high 审核通过，才能进行最终审核。" : "所有步骤必须先通过当前兼容流程的验收，才能进行最终审核。");
+          throw new Error(store.state.settings.smartRouting !== false ? "所有步骤必须先由独立审核者审核通过，才能进行最终审核。" : "所有步骤必须先通过当前兼容流程的验收，才能进行最终审核。");
         }
         if (busyProjects.has(project.id)) throw new Error("这个项目已有 Agent 正在运行。");
         busyProjects.add(project.id);
@@ -2724,7 +2737,7 @@ export async function createLoopCanvasServer(options = {}) {
       if (request.method === "POST" && approveMatch) {
         const project = projectOrThrow(store, approveMatch[1]);
         const step = project.steps.find((item) => item.id === approveMatch[2]);
-        if (store.state.settings.smartRouting !== false && enforceAgentReviewChain && step?.agentReview?.verdict !== "pass") throw new Error("智能路由下必须先由 Sol high 审核通过，不能直接验收。");
+        if (store.state.settings.smartRouting !== false && enforceAgentReviewChain && step?.agentReview?.verdict !== "pass") throw new Error("智能路由下必须先由独立审核者审核通过，不能直接验收。");
         await store.mutate(() => {
           approveStep(project, approveMatch[2]);
           if (store.state.settings.smartRouting !== false && project.steps.every((item) => item.status === "approved")) project.phase = "final_review";
@@ -2751,7 +2764,7 @@ export async function createLoopCanvasServer(options = {}) {
       const rollbackMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/steps\/([^/]+)\/rollback$/);
       if (request.method === "POST" && rollbackMatch) {
         const project = projectOrThrow(store, rollbackMatch[1]);
-        await store.mutate(() => rollbackStep(project, rollbackMatch[2]));
+        await restoreProject(project.id, () => store.rollbackStep(project.id, rollbackMatch[2]));
         return json(response, 200, { state: publicState(store, busyProjects) });
       }
 
@@ -2795,7 +2808,8 @@ export async function createLoopCanvasServer(options = {}) {
   });
 
   server.once("close", () => { runtimePreviewManager.close().catch(() => null); });
-  return { server, store, token, remoteManager, runtimePreviewManager };
+  server.once("close", () => { workflowRuntime.close().finally(() => workflowLibrary.close()); });
+  return { server, store, token, remoteManager, runtimePreviewManager, workflowLibrary, workflowRuntime };
 }
 
 export async function startServer({ host = "127.0.0.1", port = 4317, remoteHost = "127.0.0.1", remotePort = 4321, ...options } = {}) {

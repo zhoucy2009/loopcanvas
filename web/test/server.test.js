@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1196,6 +1196,11 @@ test("规划响应校验失败时保存原始 Agent 记录与可重试状态", a
     assert.equal(failed.pendingAction.type, "route_project");
     assert.equal(failed.pendingAction.status, "failed");
     assert.match(failed.lastError, /工作目录不可写/);
+    const replanned = await fetch(`${runtime.url}/api/projects/${created.project.id}/plan`, { method: "POST", headers, body: JSON.stringify({ goal: "改为创建一个带登录页的页面" }) });
+    assert.equal(replanned.status, 400);
+    const revised = runtime.store.project(created.project.id);
+    assert.equal(revised.goal, "改为创建一个带登录页的页面");
+    assert.ok(revised.context.some((item) => item.author === "用户更新需求" && item.content === "改为创建一个带登录页的页面"));
     const listing = await (await fetch(`${runtime.url}/api/projects/${created.project.id}/conversations`, { headers })).json();
     const recordMeta = listing.items.find((item) => item.operation === "route-project" && item.status === "failed");
     const record = await (await fetch(`${runtime.url}/api/projects/${created.project.id}/conversations/${encodeURIComponent(recordMeta.id)}`, { headers })).json();
@@ -1237,6 +1242,7 @@ test("自适应 graph 会暂停方向问题、询问并行方式并在依赖汇�
       seen.push({ id: step.id, cautionLevel: step.cautionLevel, directionAnswer: step.directionAnswer });
       await new Promise((resolve) => setTimeout(resolve, step.id === "deliver" ? 2 : 20));
       let artifact = null;
+      if (step.id !== "deliver") await writeFile(path.join(project.workspace, `${step.id}.txt`), step.id);
       if (step.id === "deliver") {
         const html = "<!doctype html><main>组合完成</main>";
         await writeFile(path.join(project.workspace, "index.html"), html);
@@ -1257,14 +1263,14 @@ test("自适应 graph 会暂停方向问题、询问并行方式并在依赖汇�
     assert.equal(response.status, 200);
     assert.equal(runtime.store.project(projectId).executionRun.status, "awaiting_direction");
     assert.equal(seen.length, 0);
-    assert.deepEqual(runtime.store.project(projectId).checkpoints.map((item) => item.key), ["decision:a"]);
+    assert.deepEqual(runtime.store.project(projectId).checkpoints.filter((item) => item.key).map((item) => item.key), ["decision:a"]);
 
     assert.equal((await fetch(`${runtime.url}/api/projects/${projectId}/steps/a/caution`, { method: "POST", headers, body: JSON.stringify({ cautionLevel: "high" }) })).status, 200);
     assert.equal((await fetch(`${runtime.url}/api/projects/${projectId}/steps/a/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "speed", supplemental: "" }) })).status, 200);
     response = await fetch(`${runtime.url}/api/projects/${projectId}/run`, { method: "POST", headers, body: JSON.stringify({ mode: "ask" }) });
     assert.equal(response.status, 200);
     assert.equal(runtime.store.project(projectId).executionRun.status, "awaiting_parallel_choice");
-    assert.deepEqual(runtime.store.project(projectId).checkpoints.map((item) => item.key), ["decision:a", "decision:parallel:a+b"]);
+    assert.deepEqual(runtime.store.project(projectId).checkpoints.filter((item) => item.key).map((item) => item.key), ["decision:a", "decision:parallel:a+b"]);
 
     response = await fetch(`${runtime.url}/api/projects/${projectId}/run`, { method: "POST", headers, body: JSON.stringify({ mode: "parallel" }) });
     assert.equal(response.status, 200);
@@ -1275,9 +1281,66 @@ test("自适应 graph 会暂停方向问题、询问并行方式并在依赖汇�
     assert.deepEqual(finished.steps.map((step) => step.status), ["approved", "approved", "approved"]);
     assert.equal(finished.executionRun.status, "completed");
     assert.equal(finished.artifact.filename, "index.html");
-    assert.deepEqual(finished.checkpoints.map((item) => item.key), ["decision:a", "decision:parallel:a+b", "execution:a+b", "execution:deliver"]);
-    assert.equal(new Set(finished.checkpoints.map((item) => item.key)).size, finished.checkpoints.length);
+    assert.deepEqual(finished.checkpoints.filter((item) => item.kind === "execution").map((item) => item.stepIds), [[], ["a", "b"], ["deliver"]]);
+    assert.equal(new Set(finished.checkpoints.map((item) => item.id)).size, finished.checkpoints.length);
+    const checkpointIds = finished.checkpoints.map((item) => item.id);
+    const restoreStep = (stepId) => fetch(`${runtime.url}/api/projects/${projectId}/steps/${stepId}/rollback`, { method: "POST", headers, body: "{}" });
+    assert.equal((await restoreStep("deliver")).status, 200);
+    assert.deepEqual(runtime.store.project(projectId).steps.map((step) => step.status), ["approved", "approved", "ready"]);
+    assert.equal(await readFile(path.join(finished.workspace, "a.txt"), "utf8"), "a");
+    await assert.rejects(stat(path.join(finished.workspace, "index.html")), { code: "ENOENT" });
+    assert.equal((await restoreStep("b")).status, 200, "非首个并行节点也应指向同一批次执行前检查点");
+    assert.deepEqual(runtime.store.project(projectId).steps.map((step) => step.status), ["ready", "ready", "locked"]);
+    await assert.rejects(stat(path.join(finished.workspace, "a.txt")), { code: "ENOENT" });
+    await assert.rejects(stat(path.join(finished.workspace, "b.txt")), { code: "ENOENT" });
+    assert.equal((await restoreStep("b")).status, 200);
+    assert.deepEqual(runtime.store.project(projectId).checkpoints.map((item) => item.id), checkpointIds);
   } finally {
+    await new Promise((resolve) => runtime.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("回退拒绝仍在运行或尚未退出的 Agent，退出后同时恢复文件和节点", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "loopcanvas-rollback-busy-"));
+  let started, finish;
+  const running = new Promise((resolve) => { started = resolve; });
+  const gate = new Promise((resolve) => { finish = resolve; });
+  const runtime = await startServer({
+    port: 0, dataDirectory: directory, workspace: path.join(directory, "workspace"),
+    executeWithHarness: async (project) => {
+      await writeFile(path.join(project.workspace, "value"), "during execution");
+      started();
+      await gate;
+      throw new Error("Agent stopped");
+    }
+  });
+  try {
+    const { applyAdaptiveRoute } = await import("../src/store.js");
+    const id = (await runtime.store.createProject({ goal: "busy rollback" })).id;
+    const project = runtime.store.project(id);
+    await runtime.store.mutate(() => applyAdaptiveRoute(project, { executionShape: "graph", primaryArtifact: { filename: "value" }, steps: [{ id: "a", title: "A", dependencies: [] }] }));
+    const file = path.join(project.workspace, "value");
+    await writeFile(file, "before");
+    const { token } = await (await fetch(`${runtime.url}/api/bootstrap`)).json();
+    const post = (endpoint, body = {}) => fetch(`${runtime.url}/api/projects/${id}/${endpoint}`, { method: "POST", headers: { "Content-Type": "application/json", "X-LoopCanvas-Token": token }, body: JSON.stringify(body) });
+    const execution = post("run", { mode: "sequential", stepId: "a" });
+    await running;
+    const ids = project.checkpoints.map((item) => item.id);
+    assert.equal((await post("steps/a/rollback")).status, 400);
+    await post("pause");
+    const stopping = await post("steps/a/rollback");
+    assert.equal(stopping.status, 400);
+    assert.match((await stopping.json()).error, /仍在执行或停止中/);
+    assert.equal(await readFile(file, "utf8"), "during execution");
+    finish();
+    await execution;
+    assert.equal((await post("steps/a/rollback")).status, 200);
+    assert.equal(await readFile(file, "utf8"), "before");
+    assert.equal(runtime.store.project(id).steps[0].status, "ready");
+    assert.deepEqual(runtime.store.project(id).checkpoints.map((item) => item.id), ids);
+  } finally {
+    finish();
     await new Promise((resolve) => runtime.server.close(resolve));
     await rm(directory, { recursive: true, force: true });
   }
@@ -1605,13 +1668,10 @@ test("方向节点也经 Sol high 审核后才允许构建并进入最终裁决"
   let finalReviews = 0;
   const runtime = await startServer({
     port: 0, dataDirectory: directory, workspace, enforceAgentReviewChain: true,
-    reviewStepWithHarness: async ({ step }) => {
-      directionReviews += 1;
-      if (directionReviews === 1) throw new Error("审核服务暂时不可用");
-      if (directionReviews === 2) return { verdict: "repair", summary: "方向说明不完整", findings: [{ severity: "major", criterion: "方向已记录", evidence: "缺少范围", repairInstruction: "重新确认范围" }], verifiedEvidence: [], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } };
-      return { verdict: "pass", summary: "方向记录完整", findings: [], verifiedEvidence: ["用户选择已记录"], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } };
+    executeWithHarness: async (_project, step) => {
+      if (step.kind === "decision") directionReviews++;
+      return ({ request: { id: step.id }, rawOutput: "{}", route: { role: "executor", runtime: "codex", model: step.kind === "deliver" ? "gpt-5.6-terra" : "gpt-5.6-luna", effort: "high", available: true }, result: { assistantMessage: `${step.title}完成`, summary: `${step.title}完成`, actualChanges: step.kind === "deliver" ? ["index.html"] : [], evidence: ["已验证"], deviation: "无", rollback: "恢复", verificationPassed: true, blockingIssues: [], artifact: step.kind === "deliver" ? { title: "页面", kind: "html", content: "", filename: "index.html", projectRoot: workspace, files: [], entrypoint: "index.html", dependencies: [], runCommands: [], testCommands: [], testResults: [] } : null }, agentReview: { verdict: "pass", summary: "节点通过", findings: [], verifiedEvidence: ["已复查"], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } } });
     },
-    executeWithHarness: async (_project, step) => ({ request: { id: step.id }, rawOutput: "{}", route: { role: "executor", runtime: "codex", model: step.kind === "deliver" ? "gpt-5.6-terra" : "gpt-5.6-luna", effort: "high", available: true }, result: { assistantMessage: `${step.title}完成`, summary: `${step.title}完成`, actualChanges: step.kind === "deliver" ? ["index.html"] : [], evidence: ["已验证"], deviation: "无", rollback: "恢复", verificationPassed: true, blockingIssues: [], artifact: step.kind === "deliver" ? { title: "页面", kind: "html", content: "", filename: "index.html", projectRoot: workspace, files: [], entrypoint: "index.html", dependencies: [], runCommands: [], testCommands: [], testResults: [] } : null }, agentReview: { verdict: "pass", summary: "节点通过", findings: [], verifiedEvidence: ["已复查"], reviewedRevision: step.revision, route: { role: "reviewer", runtime: "codex", model: "gpt-5.6-sol", effort: "high", available: true } } }),
     finalReviewWithHarness: async () => {
       finalReviews += 1;
       if (finalReviews === 1) return { verdict: "repair", summary: "需要重新确认方向", findings: [{ severity: "major", criterion: "可打开", evidence: "最终页面与方向不一致", repairInstruction: "重新选择方向后再构建" }], verifiedEvidence: [], acceptanceResults: [{ criterion: "可打开", passed: false, evidence: "方向需重选" }], repairStepIds: ["direction"], route: { role: "judge", runtime: "codex", model: "gpt-5.6-sol", effort: "xhigh", available: true } };
@@ -1634,27 +1694,17 @@ test("方向节点也经 Sol high 审核后才允许构建并进入最终裁决"
         { id: "deliver", title: "交付", purpose: "交付页面", kind: "deliver", status: "locked", revision: 1, dependencies: ["build"], parallelSafe: false, writeScope: ["index.html"], conversation: [], subprocesses: [], acceptanceCriteria: ["可打开"] }
       ];
     });
-    const failedDirection = await fetch(`${runtime.url}/api/projects/${project.id}/steps/direction/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "calm" }) });
-    assert.equal(failedDirection.status, 400);
-    assert.equal(project.steps[0].status, "ready");
-    assert.equal(project.steps[0].directionAnswer, "");
-    assert.equal(project.steps[0].agentReview, null);
-    assert.equal(project.executionRun.status, "awaiting_direction");
-    const repairDirection = await fetch(`${runtime.url}/api/projects/${project.id}/steps/direction/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "calm" }) });
-    assert.equal(repairDirection.status, 200);
-    assert.equal(project.steps[0].status, "ready");
-    assert.equal(project.steps[0].directionAnswer, "");
-    assert.equal(project.steps[0].agentReview.verdict, "repair");
-    assert.equal(project.executionRun.status, "awaiting_direction");
     const direction = await fetch(`${runtime.url}/api/projects/${project.id}/steps/direction/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "calm", supplemental: "仅处理首页" }) });
     assert.equal(direction.status, 200);
-    assert.equal(directionReviews, 3);
-    assert.equal(project.steps[0].status, "approved");
-    assert.equal(project.steps[0].agentReview.verdict, "pass");
-    assert.equal(project.steps[1].status, "ready");
+    assert.equal(directionReviews, 0);
+    assert.equal(project.steps[0].status, "ready");
+    assert.equal(project.steps[0].result, null);
+    assert.equal(project.steps[0].agentReview, null);
+    assert.equal(project.steps[1].status, "locked");
     const run = await fetch(`${runtime.url}/api/projects/${project.id}/run`, { method: "POST", headers, body: JSON.stringify({ mode: "sequential" }) });
     assert.equal(run.status, 200);
     assert.equal(finalReviews, 1);
+    assert.equal(directionReviews, 1);
     assert.equal(project.finalReview.verdict, "repair");
     assert.equal(project.steps[0].status, "ready");
     assert.equal(project.steps[0].selectedDirectionOptionId, null);
@@ -1666,12 +1716,13 @@ test("方向节点也经 Sol high 审核后才允许构建并进入最终裁决"
     assert.deepEqual(project.executionRun.awaitingStepIds, ["direction"]);
     const redirected = await fetch(`${runtime.url}/api/projects/${project.id}/steps/direction/direction`, { method: "POST", headers, body: JSON.stringify({ optionId: "bold", supplemental: "重新构建首页" }) });
     assert.equal(redirected.status, 200);
-    assert.equal(directionReviews, 4);
-    assert.equal(project.steps[0].status, "approved");
+    assert.equal(directionReviews, 1);
+    assert.equal(project.steps[0].status, "ready");
     const rerun = await fetch(`${runtime.url}/api/projects/${project.id}/run`, { method: "POST", headers, body: JSON.stringify({ mode: "sequential" }) });
     assert.equal(rerun.status, 200);
     assert.deepEqual(project.steps.map((step) => step.agentReview?.verdict), ["pass", "pass", "pass"]);
     assert.equal(finalReviews, 2);
+    assert.equal(directionReviews, 2);
     assert.equal(project.finalReview.verdict, "pass");
     assert.equal(project.phase, "complete");
   } finally {

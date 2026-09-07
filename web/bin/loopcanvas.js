@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { startCodexAutoUpdates } from "../src/codex-installation.js";
 
 
 function parseArguments(argv) {
@@ -53,8 +54,18 @@ try {
   console.log(`LoopCanvas is running at ${runtime.url}`);
   if (runtime.remoteServer) console.log(`Restricted Remote listener: ${options.remoteURL} (local proxy target: ${runtime.remoteURL})`);
   console.log("The admin UI and full API are local only. Press Ctrl+C to stop.");
+  const codexUpdates = startCodexAutoUpdates({
+    settings: () => runtime.store.state.settings,
+    onResult: (result) => {
+      if (result.status === "updated") console.log(`Codex updated: ${result.before} → ${result.after}. New calls use the newest installed version.`);
+      if (result.status === "current") console.log(`Codex ${result.after} is up to date. Next check in 6 hours.`);
+    },
+    onError: (error) => console.warn(`Codex auto-update failed; the installed runtime remains available. Will retry in 6 hours: ${error.message}`)
+  });
+  runtime.server.once("close", () => codexUpdates.stop());
   if (options.open) openBrowser(runtime.url);
   const stop = () => {
+    codexUpdates.stop();
     runtime.remoteServer?.close();
     runtime.server.close(() => process.exit(0));
   };

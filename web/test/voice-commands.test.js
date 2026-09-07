@@ -36,7 +36,7 @@ test("语音命令解析回退、演示与暂停交接", () => {
   assert.equal(parseVoiceCommand("回退到第三步").stepNumber, 3);
   assert.equal(parseVoiceCommand("我看看现在的效果").type, "preview");
   assert.equal(parseVoiceCommand("暂停任务并交接").type, "pause");
-  assert.equal(voiceLocalOperationLabel("rollback"), "无 · 仅回退本机编排状态");
+  assert.equal(voiceLocalOperationLabel("rollback"), "Git worktree · 恢复本机文件与工作流");
   assert.equal(voiceLocalOperationLabel("pause"), "无 · 仅暂停/生成交接状态");
   assert.equal(voiceLocalOperationLabel("execute_step"), "");
 });

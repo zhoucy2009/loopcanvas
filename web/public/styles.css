@@ -17,7 +17,7 @@
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
-/* Four role colours are semantic; motion happens only on a real location change. */
+/* Semantic role colours connect each spirit to the working surface. */
 .agent-stage { position: sticky; top: 0; z-index: 20; flex: 0 0 142px; min-height: 142px; padding: 38px 24px 8px; background: var(--canvas); border-bottom: 1px solid var(--line); }
 .main-area > .topbar { top: 142px; }
 .agent-capsule { position: absolute; right: 24px; top: 12px; width: 272px; padding: 0 12px 9px; border: 1px solid #3e4657; border-radius: 28px; background: #191f29; }
@@ -43,6 +43,21 @@
 .sprite-flight-layer { position: fixed; inset: 0; pointer-events: none; z-index: 2; }
 .agent-sprite { position: absolute; left: 0; top: 0; width: 44px; height: 44px; pointer-events: none; }
 .agent-sprite svg { width: 100%; height: 100%; overflow: visible; }
+.agent-sprite[data-zone="pod"] svg { animation: spirit-idle 4.8s ease-in-out infinite; transform-origin: 50% 80%; }
+.agent-sprite[data-zone="pod"] .sprite-eyes { animation: spirit-blink 6.4s ease-in-out infinite; transform-origin: 24px 24px; }
+.sprite-plan svg, .sprite-plan .sprite-eyes { animation-delay: -1.2s !important; }
+.sprite-execute svg, .sprite-execute .sprite-eyes { animation-delay: -2.8s !important; }
+.sprite-review svg, .sprite-review .sprite-eyes { animation-delay: -3.7s !important; }
+@keyframes spirit-idle { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-3px) rotate(1deg); } }
+@keyframes spirit-blink { 0%, 44%, 48%, 100% { transform: scaleY(1); } 46% { transform: scaleY(.12); } }
+.sprites-paused .agent-sprite svg, .sprites-paused .sprite-eyes { animation-play-state: paused; }
+.workspace-spirit-border { position: absolute; border: 2px solid var(--spirit); border-radius: 10px; opacity: 0; transform: scale(.96, .02); transform-origin: top right; transition: opacity 160ms ease, transform 220ms ease-out; pointer-events: none; }
+.workspace-spirit-border.attached { opacity: .8; transform: scale(1); }
+@media (prefers-reduced-motion: reduce) {
+  .agent-sprite[data-zone="pod"] svg, .agent-sprite[data-zone="pod"] .sprite-eyes { animation: none; }
+  .workspace-spirit-border { transform: none; transition: opacity 100ms; }
+}
+.sprites-paused .workspace-spirit-border { transform: none; transition: none; }
 .sprite-body { fill: var(--spirit); stroke: color-mix(in srgb, var(--spirit), white 18%); stroke-width: 1.1; }
 .sprite-eyes { stroke: #17202a; stroke-width: 4; stroke-linecap: round; fill: none; }
 .sprite-glint { stroke: #fff; stroke-opacity: .45; stroke-width: 2.5; stroke-linecap: round; fill: none; }
@@ -425,6 +440,7 @@ body.sidebar-collapsed .transfer-dock { left: 10px; }
 .artifact-runtime { margin: 8px 0 12px; color: var(--muted); font-size: 11px; }
 .artifact-runtime pre { white-space: pre-wrap; color: #bdc5d5; background: #090b0f; border: 1px solid var(--line); border-radius: 8px; padding: 9px; }
 .error-card { border-color: rgba(255,109,122,.28); color: #ff9aa4; }
+.error-card .replan-hint { margin: 10px 0 0; color: #f2bec4; font-size: 13px; line-height: 1.55; }
 .node-error { margin-top: 12px; padding: 10px 12px; border: 1px solid rgba(255,109,122,.28); border-radius: 10px; background: rgba(255,109,122,.06); }
 .node-error strong, .node-error p { margin: 0; }
 .node-error strong { color: #ff9aa4; font-size: 12px; }
@@ -1432,6 +1448,24 @@ body.sidebar-collapsed .sidebar { padding: 18px 7px; }
 .smart-routing-matrix div { display: flex; min-width: 0; justify-content: space-between; gap: 8px; padding: 9px 10px; background: var(--panel); font-size: 13px; }
 .smart-routing-matrix span { color: var(--muted); }
 .smart-routing-matrix strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.codex-role-settings { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.codex-role-settings legend { padding: 0 5px; font-size: 13px; font-weight: 600; }
+.codex-role-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.codex-role-heading p, .codex-advanced-roles p { margin: 0 0 10px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.codex-role-heading button { flex: none; }
+.codex-role-row { display: grid; grid-template-columns: minmax(100px, .65fr) minmax(0, 1.4fr) minmax(85px, .45fr); align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.codex-role-row strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.codex-role-row select { min-width: 0; width: 100%; font-size: 13px; padding: 9px 8px; }
+.codex-role-settings:disabled { opacity: .65; }
+.codex-advanced-roles { margin-top: 10px; }
+.codex-advanced-roles summary { cursor: pointer; font-size: 13px; padding: 6px 0; }
+.codex-advanced-roles summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#codex-role-status:empty { display: none; }
+@media (max-width: 520px) {
+  .codex-role-row { grid-template-columns: minmax(0, 1fr) minmax(80px, .45fr); }
+  .codex-role-row strong { grid-column: 1 / -1; }
+  .codex-role-heading { flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+}
 .final-review-banner { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); }
 .final-review-banner div { min-width: 0; }
 .final-review-banner strong, .final-review-banner span { font-size: 13px; }
@@ -1462,3 +1496,40 @@ body.sidebar-collapsed .sidebar { padding: 18px 7px; }
 .language-note { margin: -4px 0 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .language-setting select { width: 100%; }
 .runtime-choice-note strong { margin-right: .35em; }
+
+/* An outer gutter holds all role outlines, separate from scrolling content. */
+.workspace { width: calc(100% - 32px); margin: 16px; }
+
+/* DeepSeek uses the same flight container and semantic colours as the spirits. */
+.sprite-deepseek { display: none; position: absolute; width: 38px; height: 50.667px; left: 3px; top: -5px; background: url("/assets/deepseek-sprites.png") 0 0 / 400% 100% no-repeat; transform-origin: 50% 80%; }
+.sprite-plan .sprite-deepseek { background-position-x: 33.333333%; animation-delay: -1.2s; }
+.sprite-execute .sprite-deepseek { background-position-x: 66.666667%; animation-delay: -2.8s; }
+.sprite-review .sprite-deepseek { background-position-x: 100%; animation-delay: -3.7s; }
+.deepseek-sprites .agent-sprite > svg { display: none; }
+.deepseek-sprites .sprite-deepseek { display: block; }
+.deepseek-sprites .agent-sprite[data-zone="pod"] .sprite-deepseek { animation-name: spirit-idle; animation-duration: 4.8s; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+.sprites-paused .sprite-deepseek { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) {
+  .deepseek-sprites .agent-sprite[data-zone="pod"] .sprite-deepseek { animation: none; }
+}
+
+/* Workflow evidence stays readable and editable while the run is paused. */
+.wf-evidence, .wf-plan-check { margin: 16px 0; padding: 16px 0; border-block: 1px solid var(--line); }
+.wf-evidence > label, .wf-evidence details { display: block; margin-block: 12px; }
+.wf-evidence textarea, .wf-evidence input:not([type="checkbox"]), .wf-evidence select { width: 100%; min-width: 0; }
+.wf-evidence .wf-confirm { display: flex; align-items: flex-start; gap: 8px; }
+.wf-annotation { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) auto; align-items: end; gap: 8px; margin-block: 10px; }
+.wf-evidence p, .wf-plan-check p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.wf-evidence a { display: inline-block; margin-block: 8px; }
+.wf-inspector details { min-width: 0; }
+@media (max-width: 700px) {
+  .agent-stage { position: relative; flex-basis: 56px; min-height: 56px; padding: 12px; }
+  .agent-capsule, .agent-work-slots, .sprite-flight-layer { display: none; }
+  .agent-work-zone { width: 100%; }
+  .main-area > .topbar { top: 0; }
+  .runtime-footer { position: relative; min-height: 0; }
+  .runtime-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .runtime-metrics > div { padding: 6px; }
+  .wf-annotation { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .wf-evidence .wf-toolbar { align-items: stretch; }
+}

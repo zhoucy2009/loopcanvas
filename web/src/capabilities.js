@@ -7,6 +7,9 @@ const LEGACY_AGENTS_RULE = "- 只处理当前步骤；不得代替用户验收�
 const ADAPTIVE_AGENTS_RULE = "- 严格遵守本次请求声明的任务边界：一步直达可在同次调用完成；执行图节点调用只处理当前节点；不得把固定拆步当成完成本身。";
 const LEGACY_CONSTITUTION_RULE = "1. 人类门控：计划、方案与执行结果一律由用户选择和验收；模型不得自我确认完成。";
 const ADAPTIVE_CONSTITUTION_RULE = "1. 人类门控：目标方向不明确时必须暂停询问；并行节点需按用户选择执行；方向明确且验证通过的节点可自动推进，不得把模型自评冒充客观证据。";
+const LEGACY_DIRECTORY_RULE = "不得在本项目工作目录之外创建、修改文件或执行命令。";
+const DIRECTORY_RULE = "项目文件与验收证据写入本项目工作目录；命令以项目目录为工作目录，可调用已安装的工具。允许宿主管理的隔离浏览器在专用临时目录保存运行数据并在结束后清理；不得修改项目外的用户文件。";
+const LEGACY_AGENTS_DIRECTORY_RULE = "- 所有文件创建、编辑与命令执行必须位于本项目工作目录内。";
 
 async function exists(candidate) {
   try { await access(candidate); return true; } catch { return false; }
@@ -59,7 +62,7 @@ export function agentsTemplate(project = {}) {
     directives,
     "",
     "## 工作守则",
-    "- 所有文件创建、编辑与命令执行必须位于本项目工作目录内。",
+    `- ${DIRECTORY_RULE}`,
     "- 每个完成声明必须附文件、命令输出、渲染结果或其他客观证据。",
     ADAPTIVE_AGENTS_RULE,
     "- 制作、集成与交付步骤必须返回可预览的完整产物。",
@@ -73,7 +76,7 @@ export function constitutionTemplate() {
     "",
     ADAPTIVE_CONSTITUTION_RULE,
     "2. 证据优先：任何“完成”必须有可核查的客观证据；文字总结、自评或计划本身不能冒充执行证据。",
-    "3. 目录边界：不得在本项目工作目录之外创建、修改文件或执行命令。",
+    `3. 目录边界：${DIRECTORY_RULE}`,
     "4. 浏览器与外部操作：只使用当前环境实际提供且已获授权的工具；可用隔离的无头浏览器验证本地产物，不得擅自启动用户的常用浏览器、读取私人登录资料或绕过审批。",
     "5. 凭证保护：不得读取、输出或保存 API Key 等敏感凭证。",
     "6. 透明失败：失败必须报告具体阻断问题与原因，不得掩盖、编造成功或跳过验证。",
@@ -106,6 +109,12 @@ export async function ensureProjectDocuments({ workspace, project = {} }) {
     headingPrefix: "# 项目宪法（不可违反的底线规则）",
     legacyRule: LEGACY_CONSTITUTION_RULE,
     adaptiveRule: ADAPTIVE_CONSTITUTION_RULE
+  });
+  await migrateGeneratedProjectRule(paths.agents, {
+    headingPrefix: "# AGENTS.md — ", legacyRule: LEGACY_AGENTS_DIRECTORY_RULE, adaptiveRule: `- ${DIRECTORY_RULE}`
+  });
+  await migrateGeneratedProjectRule(paths.constitution, {
+    headingPrefix: "# 项目宪法（不可违反的底线规则）", legacyRule: `3. 目录边界：${LEGACY_DIRECTORY_RULE}`, adaptiveRule: `3. 目录边界：${DIRECTORY_RULE}`
   });
   return paths;
 }

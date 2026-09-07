@@ -7,6 +7,34 @@ import {
   smartRoutingEnabled
 } from "../src/smart-routing.js";
 import { scopeContextForRole } from "../src/harness.js";
+import { CODEX_ROLE_PROFILES, normalizeCodexRoleModels, validateCodexRoleCatalog } from "../public/smart-routing-config.js";
+
+test("every smart role accepts an independent model and reasoning effort", () => {
+  const codexRoleModels = Object.fromEntries(Object.keys(CODEX_ROLE_PROFILES).map(key => [key, { model: `gpt-custom-${key}`, effort: "medium" }]));
+  const settings = { agentRuntime: "codex", codexRoleModels };
+  const kinds = { planner: "route_project", learning: "learning_explain_selection", search: "trusted_public_research", reviewer: "review_step", judge: "review_final", tracer: "trace_preview_source" };
+  for (const [role, kind] of Object.entries(kinds)) {
+    const route = resolveModelRoute({ kind, agentRole: role }, settings);
+    assert.equal(route.model, `gpt-custom-${role}`);
+    assert.equal(route.effort, "medium");
+  }
+  for (const [step, key] of [[{ kind: "build" }, "executorBuild"], [{ kind: "deliver" }, "executorIntegrate"], [{ kind: "deliver", riskLevel: "L2" }, "executorVerify"], [{ kind: "judge" }, "executorVerify"]]) {
+    const route = resolveModelRoute({ kind: "execute_step", agentRole: "executor", currentStep: step }, settings);
+    assert.equal(route.model, `gpt-custom-${key}`);
+  }
+  assert.equal(resolveModelRoute({ kind: "route_project", agentRole: "planner" }, { ...settings, smartRouting: false, codexModel: "manual" }).model, "manual");
+  assert.equal(resolveModelRoute({ kind: "route_project", agentRole: "planner" }, { ...settings, agentRuntime: "dsh" }).available, false);
+});
+
+test("role configuration rejects unknown keys and unavailable model capabilities", () => {
+  assert.throws(() => normalizeCodexRoleModels({ executor: { model: "gpt-6-astra", effort: "high" } }), /未知/);
+  assert.throws(() => normalizeCodexRoleModels({ planner: { model: "bad model", effort: "high" } }), /格式/);
+  assert.throws(() => normalizeCodexRoleModels(JSON.parse('{"__proto__":{"model":"gpt-test"}}')), /未知/);
+  const models = [...new Set(Object.values(CODEX_ROLE_PROFILES).map(item => item.model))].map(model => ({ model, supportedReasoningEfforts: ["low", "high", "xhigh"].map(reasoningEffort => ({ reasoningEffort })) }));
+  validateCodexRoleCatalog({}, models);
+  assert.throws(() => validateCodexRoleCatalog({ planner: { model: "gpt-missing", effort: "high" } }, models), /不可用/);
+  assert.throws(() => validateCodexRoleCatalog({ planner: { model: CODEX_MODELS.sol, effort: "max" } }, models), /不支持/);
+});
 
 test("角色路由使用稳定的 Codex 模型与默认推理强度", () => {
   assert.deepEqual(resolveModelRoute({ kind: "route_project", agentRole: "planner" }, { agentRuntime: "codex" }), {
